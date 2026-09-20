@@ -5,6 +5,7 @@ import {
   resolveSkus,
   getProducts,
   getFailedRowsDownloadUrl,
+  deleteUploadJob,
 } from "../../services/api";
 
 export default function UploadPage() {
@@ -17,6 +18,10 @@ export default function UploadPage() {
   const [skuSelections, setSkuSelections] = useState({});
   const [resolving, setResolving] = useState(false);
   const [resolveSuccessMsg, setResolveSuccessMsg] = useState("");
+  const [conflictMode, setConflictMode] = useState("REPLACE");
+  const [allowDuplicate, setAllowDuplicate] = useState(false);
+  const [duplicateConflict, setDuplicateConflict] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
 
   const loadUploads = async () => {
     try {
@@ -90,16 +95,43 @@ export default function UploadPage() {
       setUploading(true);
       setError("");
       setResult(null);
+      setDuplicateConflict(null);
       setResolveSuccessMsg("");
 
-      const data = await uploadSalesFile(file);
-      setResult(data);
-      await loadUploads();
-      setFile(null);
+      const data = await uploadSalesFile(file, {
+        conflict_mode: conflictMode,
+        allow_duplicate: allowDuplicate,
+      });
+
+      if (data && data.isConflict) {
+        setDuplicateConflict(data);
+      } else {
+        setResult(data);
+        await loadUploads();
+        setFile(null);
+      }
     } catch (err) {
       setError(err.message || "Upload failed");
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleDeleteUpload = async (uploadId) => {
+    if (!window.confirm(`Are you sure you want to delete Upload Job #${uploadId}? This will remove all created transactions and mark dependent forecasts stale.`)) {
+      return;
+    }
+
+    try {
+      setDeletingId(uploadId);
+      setError("");
+      await deleteUploadJob(uploadId);
+      setResolveSuccessMsg(`Upload Job #${uploadId} successfully deleted.`);
+      await loadUploads();
+    } catch (err) {
+      setError(err.message || `Failed to delete upload #${uploadId}`);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -213,6 +245,28 @@ export default function UploadPage() {
           Upload Sales Data
         </h2>
 
+        {duplicateConflict && (
+          <div className="mb-4 p-4 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-sm flex flex-col gap-2">
+            <div className="flex items-center gap-2 font-semibold">
+              <span>⚠️ Duplicate File Detected</span>
+            </div>
+            <p>
+              An identical file (Hash: <code className="font-mono text-xs">{duplicateConflict.file_hash?.slice(0, 12)}...</code>) was already ingested in Job #{duplicateConflict.existing_job_id}.
+            </p>
+            <div className="flex items-center gap-3 mt-1">
+              <label className="flex items-center gap-2 text-xs font-medium cursor-pointer text-amber-950">
+                <input
+                  type="checkbox"
+                  checked={allowDuplicate}
+                  onChange={(e) => setAllowDuplicate(e.target.checked)}
+                  className="rounded border-amber-400 text-amber-600 focus:ring-amber-500"
+                />
+                Override & Re-upload anyway (will apply {conflictMode} semantics)
+              </label>
+            </div>
+          </div>
+        )}
+
         <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
           <input
             type="file"
@@ -238,6 +292,45 @@ export default function UploadPage() {
               "Upload CSV"
             )}
           </button>
+        </div>
+
+        {/* Idempotent Upsert Configuration */}
+        <div className="mt-4 pt-3 border-t border-gray-100 flex flex-wrap items-center justify-between gap-4 text-xs text-gray-600">
+          <div className="flex items-center gap-3">
+            <span className="font-semibold text-gray-700">Upsert Mode:</span>
+            <label className="flex items-center gap-1 cursor-pointer">
+              <input
+                type="radio"
+                name="conflictMode"
+                value="REPLACE"
+                checked={conflictMode === "REPLACE"}
+                onChange={() => setConflictMode("REPLACE")}
+                className="text-blue-600"
+              />
+              <span>REPLACE (later upload wins)</span>
+            </label>
+            <label className="flex items-center gap-1 cursor-pointer">
+              <input
+                type="radio"
+                name="conflictMode"
+                value="ACCUMULATE"
+                checked={conflictMode === "ACCUMULATE"}
+                onChange={() => setConflictMode("ACCUMULATE")}
+                className="text-blue-600"
+              />
+              <span>ACCUMULATE (sum quantity)</span>
+            </label>
+          </div>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={allowDuplicate}
+              onChange={(e) => setAllowDuplicate(e.target.checked)}
+              className="rounded border-gray-300 text-blue-600"
+            />
+            <span>Allow duplicate file upload</span>
+          </label>
         </div>
 
         {file && (
@@ -533,13 +626,23 @@ export default function UploadPage() {
                       {upload.created_at ? new Date(upload.created_at).toLocaleString() : "N/A"}
                     </td>
                     <td className="py-3 px-3">
-                      <a
-                        href={getFailedRowsDownloadUrl(upload.id)}
-                        className="text-xs text-blue-600 hover:text-blue-800 font-medium underline"
-                        title="Download failed rows if any"
-                      >
-                        Failed Rows
-                      </a>
+                      <div className="flex items-center gap-3">
+                        <a
+                          href={getFailedRowsDownloadUrl(upload.id)}
+                          className="text-xs text-blue-600 hover:text-blue-800 font-medium underline"
+                          title="Download failed rows if any"
+                        >
+                          Failed Rows
+                        </a>
+                        <button
+                          onClick={() => handleDeleteUpload(upload.id)}
+                          disabled={deletingId === upload.id}
+                          className="text-xs text-red-600 hover:text-red-800 font-medium hover:underline disabled:opacity-50"
+                          title="Delete this upload and rollback data"
+                        >
+                          {deletingId === upload.id ? "Deleting..." : "Delete"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}

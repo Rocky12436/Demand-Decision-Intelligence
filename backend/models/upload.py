@@ -10,7 +10,10 @@ class UploadJob(Base):
     filename = Column(String(255), nullable=False)
     file_type = Column(String(50), nullable=False, default="sales")  # sales, product, inventory
     file_size_bytes = Column(BigInteger, nullable=True)
-    status = Column(String(50), nullable=False, default="PENDING", index=True)  # PENDING, VALIDATING, PROCESSING, COMPLETED, FAILED
+    dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="SET NULL"), nullable=True, index=True)
+    file_hash = Column(String(64), nullable=True, index=True)
+    conflict_mode = Column(String(20), nullable=False, default="replace")
+    status = Column(String(50), nullable=False, default="PENDING", index=True)  # PENDING, VALIDATING, PROCESSING, COMPLETED, FAILED, PARTIAL, REJECTED, DELETED
     total_rows = Column(Integer, default=0)
     processed_rows = Column(Integer, default=0)
     error_summary = Column(Text, nullable=True)
@@ -18,6 +21,7 @@ class UploadJob(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
+    dataset = relationship("Dataset", backref="upload_jobs")
     user = relationship("User", back_populates="upload_jobs")
     validation_results = relationship("ValidationResult", back_populates="upload_job", cascade="all, delete-orphan")
     sales_transactions = relationship("SalesTransaction", back_populates="upload_job", foreign_keys="[SalesTransaction.upload_job_id]")

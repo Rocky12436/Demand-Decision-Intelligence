@@ -16,8 +16,13 @@ from pydantic import BaseModel
 from backend.db.session import get_db
 from backend.models.demand import DailyProductDemand
 from backend.services.dataset_service import resolve_dataset
-from backend.services.forecast_service import compute_or_get_forecast, recompute_all_forecasts_for_dataset, get_latest_upload_job_id
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
+from backend.services.forecast_service import (
+    compute_or_get_forecast,
+    recompute_all_forecasts_for_dataset,
+    get_latest_upload_job_id,
+    check_historical_warning,
+)
 
 router = APIRouter()
 
@@ -29,6 +34,7 @@ class RecomputeForecastRequest(BaseModel):
     dataset_id: Optional[int] = None
     product_ids: Optional[List[str]] = None
     horizon_days: int = 14
+    as_of: Optional[date] = None
 
 
 @router.post("/recompute")
@@ -38,14 +44,15 @@ def recompute_forecast_endpoint(
 ):
     """
     Synchronously recomputes demand forecasts for the specified dataset and SKUs,
-    clears stale flags, and returns freshness status.
+    clears stale flags, and returns freshness status and historical warnings.
     """
     target_dataset = resolve_dataset(db, None, payload.dataset_id)
     res = recompute_all_forecasts_for_dataset(
         db=db,
         dataset_id=target_dataset.id,
         product_ids=payload.product_ids,
-        horizon_days=payload.horizon_days
+        horizon_days=payload.horizon_days,
+        as_of=payload.as_of
     )
     return res
 
@@ -57,12 +64,13 @@ def get_forecast(
     city_name: Optional[str] = None,
     dataset_id: Optional[int] = Query(default=None),
     horizon_days: int = Query(default=14, le=60),
+    as_of: Optional[date] = Query(default=None),
     db: Session = Depends(get_db)
 ):
     """
     Returns dynamically computed or baseline demand forecast scoped strictly to a dataset.
-    If product_id exists in the specified/active dataset, forecasts are dynamically generated
-    from that dataset's demand history with automatic staleness check and recomputation.
+    Forecast horizon is anchored to as_of date (or max date in dataset history).
+    If as_of is >90 days behind current date, a historical_warning is returned.
     """
     target_dataset = resolve_dataset(db, None, dataset_id)
 
@@ -73,6 +81,7 @@ def get_forecast(
             product_id=str(product_id),
             city_name=city_name,
             horizon_days=horizon_days,
+            as_of=as_of,
             force_recompute=False
         )
         if result.get("status") == "success":
@@ -81,11 +90,16 @@ def get_forecast(
 
     # Fallback to general runs store or summary if available
     latest_upload_id = get_latest_upload_job_id(db, target_dataset.id)
+    effective_as_of = as_of or target_dataset.date_max or date.today()
+    hist_warn = check_historical_warning(effective_as_of)
+
     return {
         "status": "success",
         "dataset_id": target_dataset.id,
         "dataset_name": target_dataset.name,
         "message": "Forecasting suite operational. Provide product_id for SKU-level demand forecast.",
+        "as_of": effective_as_of.isoformat(),
+        "historical_warning": hist_warn,
         "freshness": {
             "computed_at": datetime.now(timezone.utc).isoformat(),
             "data_through": target_dataset.date_max.isoformat() if target_dataset.date_max else None,

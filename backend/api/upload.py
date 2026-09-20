@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -125,8 +126,19 @@ def upload_sales(
     file: UploadFile = File(...),
     dataset_id: Optional[int] = Form(None),
     dataset_name: Optional[str] = Form(None),
+    conflict_mode: Optional[str] = Form(None),
+    allow_duplicate: Optional[bool] = Form(None),
+    query_dataset_id: Optional[int] = Query(None, alias="dataset_id"),
+    query_dataset_name: Optional[str] = Query(None, alias="dataset_name"),
+    query_conflict_mode: Optional[str] = Query(None, alias="conflict_mode"),
+    query_allow_duplicate: Optional[bool] = Query(None, alias="allow_duplicate"),
     db: Session = Depends(get_db),
 ):
+    eff_dataset_id = dataset_id if dataset_id is not None else query_dataset_id
+    eff_dataset_name = dataset_name if dataset_name is not None else query_dataset_name
+    raw_conflict = conflict_mode if conflict_mode is not None else (query_conflict_mode or "replace")
+    raw_allow_dup = allow_duplicate if allow_duplicate is not None else (query_allow_duplicate or False)
+
     if not file.filename:
         raise HTTPException(status_code=400, detail="Filename is required.")
 
@@ -135,27 +147,19 @@ def upload_sales(
 
     file_size = get_file_size(file)
 
-    upload_job = UploadJob(
-        filename=file.filename,
-        file_type="sales",
-        file_size_bytes=file_size,
-        status="PROCESSING",
-        total_rows=0,
-        processed_rows=0,
-    )
-    db.add(upload_job)
-    db.commit()
-    db.refresh(upload_job)
-
     try:
         file.file.seek(0)
         content = file.file.read()
         text = content.decode("utf-8-sig")
     except UnicodeDecodeError:
-        upload_job.status = "FAILED"
-        upload_job.error_summary = "CSV must use UTF-8 encoding."
-        db.commit()
         raise HTTPException(status_code=400, detail="CSV must use UTF-8 encoding.")
+
+    file_hash = hashlib.sha256(content).hexdigest()
+    conflict_mode_normalized = raw_conflict.strip().lower() if isinstance(raw_conflict, str) else "replace"
+    if isinstance(raw_allow_dup, str):
+        allow_duplicate_flag = raw_allow_dup.strip().lower() in ("true", "1", "yes")
+    else:
+        allow_duplicate_flag = bool(raw_allow_dup)
 
     raw_lines = text.splitlines()
     if raw_lines:
@@ -170,31 +174,18 @@ def upload_sales(
     missing_columns = REQUIRED_COLUMNS - actual_columns
 
     if missing_columns:
-        validation = ValidationResult(
-            upload_id=upload_job.id,
-            check_name="required_columns",
-            status="FAIL",
-            details=json.dumps({"missing_columns": sorted(missing_columns)}),
-        )
-        db.add(validation)
-        upload_job.status = "FAILED"
-        upload_job.error_summary = f"Missing required columns: {sorted(missing_columns)}"
-        db.commit()
         raise HTTPException(
             status_code=400,
             detail={"message": "Missing required columns.", "missing_columns": sorted(missing_columns)},
         )
 
     # 1. Resolve target dataset for this upload
-    if dataset_id is not None:
-        target_dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if eff_dataset_id is not None:
+        target_dataset = db.query(Dataset).filter(Dataset.id == eff_dataset_id).first()
         if not target_dataset:
-            upload_job.status = "FAILED"
-            upload_job.error_summary = f"Dataset id {dataset_id} not found."
-            db.commit()
-            raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found.")
+            raise HTTPException(status_code=404, detail=f"Dataset {eff_dataset_id} not found.")
     else:
-        d_name = dataset_name or f"Upload: {file.filename} ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')})"
+        d_name = eff_dataset_name or f"Upload: {file.filename} ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')})"
         target_dataset = Dataset(
             name=d_name,
             source="upload",
@@ -202,8 +193,47 @@ def upload_sales(
             row_count=0
         )
         db.add(target_dataset)
-        db.commit()
-        db.refresh(target_dataset)
+        db.flush()
+
+    # Check for duplicate file hash in dataset (Prompt 1.6)
+    existing_dup = (
+        db.query(UploadJob)
+        .filter(
+            UploadJob.dataset_id == target_dataset.id,
+            UploadJob.file_hash == file_hash,
+            UploadJob.status.in_(["COMPLETED", "PARTIAL", "SUCCESS"]),
+        )
+        .first()
+    )
+    if existing_dup and not allow_duplicate_flag:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": f"Duplicate file upload detected. File with SHA-256 {file_hash[:12]}... already ingested in Job #{existing_dup.id}.",
+                "prior_job_id": existing_dup.id,
+                "filename": existing_dup.filename,
+                "file_hash": file_hash,
+                "message": "This file has already been ingested. Provide allow_duplicate=true to re-upload anyway."
+            }
+        )
+
+    upload_job = UploadJob(
+        filename=file.filename,
+        file_type="sales",
+        file_size_bytes=file_size,
+        dataset_id=target_dataset.id,
+        file_hash=file_hash,
+        conflict_mode=conflict_mode_normalized,
+        status="PROCESSING",
+        total_rows=0,
+        processed_rows=0,
+    )
+    db.add(upload_job)
+    db.flush()
+
+    # If re-uploading duplicate with REPLACE mode, clear previous transactions from existing_dup to avoid doubling
+    if existing_dup and allow_duplicate_flag and conflict_mode_normalized == "replace":
+        db.query(SalesTransaction).filter(SalesTransaction.upload_job_id == existing_dup.id).delete(synchronize_session=False)
 
     # 2. Prepare SKU mapping and lookup tables
     existing_products = db.query(Product).all()
@@ -450,13 +480,22 @@ def upload_sales(
         ).first()
 
         if existing:
-            existing.total_quantity = metrics["quantity"]
-            existing.total_sales_value = metrics["revenue"]
-            existing.total_discount_value = metrics["discount"]
-            existing.order_count = len(metrics["orders"])
+            if conflict_mode_normalized == "accumulate":
+                existing.total_quantity += metrics["quantity"]
+                existing.total_sales_value += metrics["revenue"]
+                existing.total_discount_value += metrics["discount"]
+                existing.order_count += len(metrics["orders"])
+            else:  # replace (default)
+                existing.total_quantity = metrics["quantity"]
+                existing.total_sales_value = metrics["revenue"]
+                existing.total_discount_value = metrics["discount"]
+                existing.order_count = len(metrics["orders"])
+
             existing.upload_job_id = upload_job.id
             if existing.total_quantity > 0:
                 existing.avg_unit_price = round(existing.total_sales_value / existing.total_quantity, 2)
+            else:
+                existing.avg_unit_price = 0.0
         else:
             unit_p = round(metrics["revenue"] / metrics["quantity"], 2) if metrics["quantity"] > 0 else 0.0
             new_demand = DailyProductDemand(
@@ -560,6 +599,8 @@ def upload_sales(
         "sample_errors": sample_errors[:10],
         "unmapped_skus": list(unmapped_skus)[:50],
         "suggested_mappings": suggested_mappings[:50],
+        "file_hash": file_hash,
+        "conflict_mode": conflict_mode_normalized,
         "message": "File processed successfully.",
         "created_at": upload_job.created_at,
     }
@@ -847,4 +888,127 @@ def get_validation_results(upload_id: int, db: Session = Depends(get_db)):
             }
             for result in results
         ],
+    }
+
+
+@router.delete("/uploads/{upload_id}")
+@router.delete("/{upload_id}")
+def delete_upload_job(upload_id: int, db: Session = Depends(get_db)):
+    """
+    Deletes an upload job and rolls back all data it created:
+    - Removes sales_transactions created by this job
+    - Recalculates or deletes affected daily_product_demand rows
+    - Marks dependent forecast_runs, inventory_recommendations, anomalies as stale
+    - Re-syncs DuckDB Parquet
+    - Deletes the upload_job record
+    """
+    upload_job = db.query(UploadJob).filter(UploadJob.id == upload_id).first()
+    if not upload_job:
+        raise HTTPException(status_code=404, detail=f"Upload job {upload_id} not found.")
+
+    dataset_id = upload_job.dataset_id
+
+    # 1. Fetch transactions created by this job
+    transactions = (
+        db.query(SalesTransaction)
+        .filter(
+            (SalesTransaction.upload_job_id == upload_id) | (SalesTransaction.upload_id == upload_id)
+        )
+        .all()
+    )
+
+    affected_keys = set()
+    affected_products = set()
+    for tx in transactions:
+        d_id = tx.dataset_id or dataset_id
+        if d_id:
+            affected_keys.add((d_id, tx.date_, tx.product_id, tx.city_name))
+        affected_products.add(tx.product_id)
+        if not dataset_id:
+            dataset_id = tx.dataset_id
+
+    # 2. Delete sales transactions
+    deleted_tx_count = (
+        db.query(SalesTransaction)
+        .filter(
+            (SalesTransaction.upload_job_id == upload_id) | (SalesTransaction.upload_id == upload_id)
+        )
+        .delete(synchronize_session=False)
+    )
+
+    # 3. Recalculate or delete DailyProductDemand for affected keys
+    recalculated_demand_count = 0
+    deleted_demand_count = 0
+    for d_id, d_date, p_id, city in affected_keys:
+        demand_row = (
+            db.query(DailyProductDemand)
+            .filter(
+                DailyProductDemand.dataset_id == d_id,
+                DailyProductDemand.date_ == d_date,
+                DailyProductDemand.product_id == p_id,
+                DailyProductDemand.city_name == city,
+            )
+            .first()
+        )
+        if demand_row:
+            remaining_txs = (
+                db.query(SalesTransaction)
+                .filter(
+                    SalesTransaction.dataset_id == d_id,
+                    SalesTransaction.date_ == d_date,
+                    SalesTransaction.product_id == p_id,
+                    SalesTransaction.city_name == city,
+                )
+                .all()
+            )
+            if remaining_txs:
+                total_qty = sum(float(tx.procured_quantity or 0.0) for tx in remaining_txs)
+                total_rev = sum(float(tx.procured_quantity or 0.0) * float(tx.unit_selling_price or 0.0) for tx in remaining_txs)
+                total_disc = sum(float(tx.total_discount_amount or 0.0) for tx in remaining_txs)
+                demand_row.total_quantity = total_qty
+                demand_row.total_sales_value = total_rev
+                demand_row.total_discount_value = total_disc
+                demand_row.order_count = len(set(tx.order_id for tx in remaining_txs if tx.order_id))
+                demand_row.avg_unit_price = round(total_rev / total_qty, 2) if total_qty > 0 else 0.0
+                recalculated_demand_count += 1
+            else:
+                db.delete(demand_row)
+                deleted_demand_count += 1
+
+    # 4. Invalidate downstream results
+    if dataset_id:
+        db.query(ForecastRun).filter(
+            (ForecastRun.dataset_id == dataset_id) | (ForecastRun.source_upload_job_id == upload_id)
+        ).update({"is_stale": True}, synchronize_session=False)
+
+        if affected_products:
+            db.query(InventoryRecommendation).filter(
+                InventoryRecommendation.dataset_id == dataset_id,
+                InventoryRecommendation.product_id.in_(affected_products)
+            ).update({"is_stale": True}, synchronize_session=False)
+
+        db.query(AnomalyAlert).filter(
+            AnomalyAlert.dataset_id == dataset_id,
+            AnomalyAlert.product_id.in_(affected_products)
+        ).update({"is_stale": True}, synchronize_session=False)
+
+    # 5. Delete upload job
+    db.delete(upload_job)
+    db.commit()
+
+    # 6. Re-sync DuckDB Parquet if dataset exists
+    if dataset_id:
+        try:
+            sync_dataset_to_duckdb(dataset_id, db)
+        except Exception as d_err:
+            print(f"DuckDB sync on upload delete notice: {d_err}")
+
+    return {
+        "status": "success",
+        "deleted_job_id": upload_id,
+        "deleted_transactions": deleted_tx_count,
+        "deleted_sales_count": deleted_tx_count,
+        "recalculated_demand_rows": recalculated_demand_count,
+        "deleted_demand_rows": deleted_demand_count,
+        "message": f"Upload job #{upload_id} successfully deleted and rolled back."
     }

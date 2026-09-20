@@ -50,6 +50,7 @@ export default function ForecastPage() {
   const [feedbackMsg, setFeedbackMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [freshness, setFreshness] = useState(null);
+  const [historicalWarning, setHistoricalWarning] = useState(null);
 
   // 1. Initial Load: Fetch top products & existing runs
   useEffect(() => {
@@ -69,10 +70,13 @@ export default function ForecastPage() {
         }
       }
 
-      // Fetch base forecast freshness
+      // Fetch base forecast freshness & historical warning
       const fRes = await api.get('/api/forecast').catch(() => null);
       if (fRes?.data?.freshness) {
         setFreshness(fRes.data.freshness);
+      }
+      if (fRes?.data?.historical_warning) {
+        setHistoricalWarning(fRes.data.historical_warning);
       }
 
       // Fetch existing forecast runs
@@ -130,6 +134,9 @@ export default function ForecastPage() {
         if (data?.freshness) {
           setFreshness(data.freshness);
         }
+        if (data?.historical_warning) {
+          setHistoricalWarning(data.historical_warning);
+        }
       } catch (err) {
         // ignore
       }
@@ -145,6 +152,9 @@ export default function ForecastPage() {
       const res = await recomputeForecast(null, [selectedProduct]);
       if (res?.freshness) {
         setFreshness(res.freshness);
+      }
+      if (res?.historical_warning) {
+        setHistoricalWarning(res.historical_warning);
       }
       setFeedbackMsg(`Forecast recomputed successfully for SKU ${selectedProduct}!`);
       await loadRuns();
@@ -257,6 +267,32 @@ export default function ForecastPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '0.85rem 1.25rem', backgroundColor: 'rgba(244, 63, 94, 0.12)', border: '1px solid var(--accent-rose)', borderRadius: '8px', color: 'var(--accent-rose)', marginBottom: '1.5rem' }}>
           <AlertCircle size={18} />
           <span>{errorMsg}</span>
+        </div>
+      )}
+
+      {/* Retrospective Warning Banner for Outdated Datasets */}
+      {historicalWarning && historicalWarning.is_historical && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '0.85rem',
+          padding: '1rem 1.25rem',
+          backgroundColor: 'rgba(245, 158, 11, 0.12)',
+          border: '1px solid #f59e0b',
+          borderRadius: '8px',
+          color: '#fbbf24',
+          marginBottom: '1.5rem',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
+        }}>
+          <AlertCircle size={22} style={{ flexShrink: 0, marginTop: '2px', color: '#f59e0b' }} />
+          <div>
+            <div style={{ fontWeight: 600, fontSize: '0.95rem', color: '#f59e0b', marginBottom: '0.2rem' }}>
+              Historical Retrospective Mode
+            </div>
+            <div style={{ fontSize: '0.85rem', color: '#fef3c7', lineHeight: 1.5 }}>
+              {historicalWarning.message || `Forecast horizon is anchored to historical data through ${historicalWarning.as_of} (${historicalWarning.days_behind} days ago). Predictions represent retrospective projections, not live real-time conditions.`}
+            </div>
+          </div>
         </div>
       )}
 

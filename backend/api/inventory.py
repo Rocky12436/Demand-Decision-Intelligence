@@ -21,16 +21,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 REPORTS_DIR = PROJECT_ROOT / "reports"
 
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from sqlalchemy import func
 from backend.models.inventory import InventoryRecommendation
 from backend.models.upload import UploadJob
+from backend.services.forecast_service import check_historical_warning
 
 @router.get("/recommendations")
 def get_inventory_recommendations(
     product_id: Optional[str] = None,
     city_name: Optional[str] = None,
     dataset_id: Optional[int] = Query(default=None),
+    as_of: Optional[date] = Query(default=None),
     limit: int = Query(default=100, le=1000),
     db: Session = Depends(get_db)
 ):
@@ -66,6 +68,8 @@ def get_inventory_recommendations(
             DailyProductDemand.dataset_id == target_dataset.id,
             DailyProductDemand.product_id == str(product_id)
         )
+        if as_of:
+            query = query.filter(DailyProductDemand.date_ <= as_of)
         if city_name:
             query = query.filter(DailyProductDemand.city_name == city_name)
 
@@ -84,6 +88,9 @@ def get_inventory_recommendations(
 
             avg_price = records[-1].avg_unit_price if records[-1].avg_unit_price else 10.0
             unit_landing_cost = round(avg_price * 0.8, 2)
+
+            effective_as_of = as_of or records[-1].date_
+            hist_warn = check_historical_warning(effective_as_of)
 
             rec = {
                 "dataset_id": target_dataset.id,
@@ -106,6 +113,8 @@ def get_inventory_recommendations(
                 "dataset_id": target_dataset.id,
                 "total_returned": 1,
                 "data": [rec],
+                "as_of": effective_as_of.isoformat(),
+                "historical_warning": hist_warn,
                 "freshness": {
                     "computed_at": datetime.now(timezone.utc).isoformat(),
                     "data_through": records[-1].date_.isoformat() if records else None,
@@ -126,12 +135,17 @@ def get_inventory_recommendations(
     if city_name:
         df = df[df["city_name"].astype(str).str.lower() == str(city_name).lower()]
 
+    effective_as_of = as_of or target_dataset.date_max or date.today()
+    hist_warn = check_historical_warning(effective_as_of)
+
     res_slice = df.head(limit).to_dict(orient="records")
     return {
         "status": "success",
         "dataset_id": target_dataset.id,
         "total_returned": len(res_slice),
         "data": res_slice,
+        "as_of": effective_as_of.isoformat(),
+        "historical_warning": hist_warn,
         "freshness": {
             "computed_at": datetime.now(timezone.utc).isoformat(),
             "data_through": target_dataset.date_max.isoformat() if target_dataset.date_max else None,

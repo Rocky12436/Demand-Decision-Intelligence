@@ -24,17 +24,19 @@ api.interceptors.request.use((config) => {
 });
 
 export { API_BASE_URL };
-export async function uploadSalesFile(file) {
+
+export async function uploadSalesFile(file, options = {}) {
   const formData = new FormData();
   formData.append("file", file);
 
-  const response = await fetch(
-    `${API_BASE_URL}/upload/sales`,
-    {
-      method: "POST",
-      body: formData,
-    }
-  );
+  const conflictMode = options.conflict_mode || "REPLACE";
+  const allowDuplicate = options.allow_duplicate ? "true" : "false";
+  const url = `${API_BASE_URL}/upload/sales?conflict_mode=${conflictMode}&allow_duplicate=${allowDuplicate}`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    body: formData,
+  });
 
   let data;
   try {
@@ -43,14 +45,33 @@ export async function uploadSalesFile(file) {
     throw new Error("Invalid response format from server");
   }
 
+  if (response.status === 409) {
+    return {
+      isConflict: true,
+      error_summary: data.detail || "Duplicate file detected in this dataset.",
+      existing_job_id: data.existing_job_id || null,
+      ...data,
+    };
+  }
+
   if (!response.ok) {
-    // If backend returns a structured validation response (e.g. 422 with REJECTED status, unmapped_skus, or error_breakdown)
     if (data && (data.status || data.error_breakdown || data.unmapped_skus)) {
       return data;
     }
     throw new Error(data.detail || "Sales upload failed");
   }
 
+  return data;
+}
+
+export async function deleteUploadJob(uploadId) {
+  const response = await fetch(`${API_BASE_URL}/upload/${uploadId}`, {
+    method: "DELETE",
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || "Failed to delete upload");
+  }
   return data;
 }
 
