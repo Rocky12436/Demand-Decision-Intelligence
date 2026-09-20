@@ -1,9 +1,11 @@
 import csv
+import io
 import json
-from datetime import datetime
-from typing import Optional
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, Query
-from fastapi.responses import JSONResponse
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, List, Dict, Any
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, Query, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 import rapidfuzz
 
@@ -14,9 +16,20 @@ from backend.models.sales import SalesTransaction
 from backend.models.upload import UploadJob, ValidationResult
 from backend.models.demand import DailyProductDemand
 from backend.models.dataset import Dataset, SkuMapping
+from backend.models.forecast import ForecastRun, ForecastItem
+from backend.models.inventory import InventoryRecommendation
+from backend.models.anomaly import AnomalyAlert
 from backend.services.dataset_service import resolve_dataset
+from backend.services.duckdb_service import sync_dataset_to_duckdb
 
 router = APIRouter()
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+FAILED_ROWS_DIR = PROJECT_ROOT / "dataset" / "failed_rows"
+FAILED_ROWS_DIR.mkdir(parents=True, exist_ok=True)
+
+# In-memory store for fast access to failed rows per upload job
+FAILED_ROWS_CACHE: Dict[int, List[Dict[str, Any]]] = {}
 
 
 @router.get("/test")
@@ -88,6 +101,25 @@ def get_file_size(file: UploadFile):
         return None
 
 
+def save_failed_rows(upload_id: int, failed_rows: List[Dict[str, Any]]):
+    FAILED_ROWS_CACHE[upload_id] = failed_rows
+    fpath = FAILED_ROWS_DIR / f"failed_rows_{upload_id}.json"
+    with open(fpath, "w", encoding="utf-8") as f:
+        json.dump(failed_rows, f)
+
+
+def load_failed_rows(upload_id: int) -> List[Dict[str, Any]]:
+    if upload_id in FAILED_ROWS_CACHE:
+        return FAILED_ROWS_CACHE[upload_id]
+    fpath = FAILED_ROWS_DIR / f"failed_rows_{upload_id}.json"
+    if fpath.exists():
+        with open(fpath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            FAILED_ROWS_CACHE[upload_id] = data
+            return data
+    return []
+
+
 @router.post("/sales")
 def upload_sales(
     file: UploadFile = File(...),
@@ -125,6 +157,14 @@ def upload_sales(
         db.commit()
         raise HTTPException(status_code=400, detail="CSV must use UTF-8 encoding.")
 
+    raw_lines = text.splitlines()
+    if raw_lines:
+        first_line = raw_lines[0]
+        header_cols = [c.strip() for c in first_line.split(",")]
+        if "date" in header_cols and "date_" not in header_cols:
+            header_cols = ["date_" if c == "date" else c for c in header_cols]
+            text = "\n".join([",".join(header_cols)] + raw_lines[1:])
+
     reader = csv.DictReader(text.splitlines())
     actual_columns = set(reader.fieldnames or [])
     missing_columns = REQUIRED_COLUMNS - actual_columns
@@ -154,8 +194,7 @@ def upload_sales(
             db.commit()
             raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found.")
     else:
-        # Create a new dataset specifically scoped to this upload
-        d_name = dataset_name or f"Upload: {file.filename} ({datetime.utcnow().strftime('%Y-%m-%d %H:%M')})"
+        d_name = dataset_name or f"Upload: {file.filename} ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')})"
         target_dataset = Dataset(
             name=d_name,
             source="upload",
@@ -190,6 +229,7 @@ def upload_sales(
     unmapped_skus = set()
     suggested_mappings = []
     seen_proposed_skus = set()
+    failed_rows_list = []
 
     seen_rows = set()
     sales_batch = []
@@ -203,6 +243,7 @@ def upload_sales(
     total_rows = len(lines)
 
     for row_idx, row in enumerate(lines, start=1):
+        raw_row = dict(row)
         for col in IGNORED_COLUMNS:
             row.pop(col, None)
 
@@ -230,7 +271,6 @@ def upload_sales(
             elif product_value.upper() in normalized_products:
                 resolved_product_id = normalized_products[product_value.upper()].product_id
             else:
-                # SKU is unknown: Check rapidfuzz token_sort_ratio >= 88
                 best_match = None
                 best_score = 0.0
                 for p in existing_products:
@@ -248,7 +288,6 @@ def upload_sales(
                         "confidence": round(best_score / 100.0, 2)
                     })
 
-                # Check AUTO_CREATE_UNKNOWN_SKUS
                 if settings.AUTO_CREATE_UNKNOWN_SKUS:
                     new_prod = Product(
                         product_id=product_value,
@@ -265,7 +304,6 @@ def upload_sales(
                     existing_products.append(new_prod)
                     resolved_product_id = product_value
 
-                    # Record SKU mapping
                     sku_map = SkuMapping(
                         dataset_id=target_dataset.id,
                         external_sku=product_value,
@@ -322,9 +360,10 @@ def upload_sales(
             error_breakdown[primary_error] += 1
             if len(sample_errors) < 10 and error_detail:
                 sample_errors.append(error_detail)
+            raw_row["error_reason"] = primary_error
+            failed_rows_list.append(raw_row)
             continue
 
-        # Row is Valid
         valid_rows += 1
         city = row.get("city_name", "ALL")
         discount = parse_float(row.get("total_discount_amount")) or 0.0
@@ -365,6 +404,10 @@ def upload_sales(
             db.flush()
             sales_batch.clear()
 
+    # Save failed rows for download/resolution
+    if failed_rows_list:
+        save_failed_rows(upload_job.id, failed_rows_list)
+
     # 3. HARD FAILURE ON EMPTY RESULT (valid_rows == 0)
     if valid_rows == 0:
         upload_job.total_rows = total_rows
@@ -378,7 +421,10 @@ def upload_sales(
             content={
                 "status": "rejected",
                 "reason": "no_valid_rows",
+                "upload_id": upload_job.id,
                 "total_rows": total_rows,
+                "valid_rows": 0,
+                "invalid_rows": total_rows,
                 "error_breakdown": error_breakdown,
                 "sample_errors": sample_errors[:10],
                 "unmapped_skus": list(unmapped_skus)[:50],
@@ -393,7 +439,9 @@ def upload_sales(
         sales_batch.clear()
 
     # Upsert into DailyProductDemand (scoped to target_dataset.id)
+    touched_product_ids = set()
     for (d_date, p_id, city), metrics in agg_map.items():
+        touched_product_ids.add(p_id)
         existing = db.query(DailyProductDemand).filter(
             DailyProductDemand.dataset_id == target_dataset.id,
             DailyProductDemand.date_ == d_date,
@@ -425,15 +473,45 @@ def upload_sales(
             )
             db.add(new_demand)
 
-    # 4. Set upload status: check warning band (0 < valid_rows < 0.5 * total_rows)
-    if valid_rows < (total_rows * 0.5):
-        upload_job.status = "VALIDATED_WITH_WARNINGS"
+    # Invalidate downstream results for touched SKUs (Prompt 1.4)
+    if touched_product_ids:
+        # Mark forecast items / runs stale
+        stale_run_ids = (
+            db.query(ForecastItem.run_id)
+            .filter(
+                ForecastItem.dataset_id == target_dataset.id,
+                ForecastItem.product_id.in_(touched_product_ids)
+            )
+            .distinct()
+            .all()
+        )
+        run_ids = [r[0] for r in stale_run_ids]
+        if run_ids:
+            db.query(ForecastRun).filter(ForecastRun.id.in_(run_ids)).update({"is_stale": True}, synchronize_session=False)
+
+        # Mark inventory recommendations stale
+        db.query(InventoryRecommendation).filter(
+            InventoryRecommendation.dataset_id == target_dataset.id,
+            InventoryRecommendation.product_id.in_(touched_product_ids)
+        ).update({"is_stale": True}, synchronize_session=False)
+
+        # Mark anomalies stale
+        db.query(AnomalyAlert).filter(
+            AnomalyAlert.dataset_id == target_dataset.id,
+            AnomalyAlert.product_id.in_(touched_product_ids)
+        ).update({"is_stale": True}, synchronize_session=False)
+
+    # Status check: COMPLETED (100% valid), PARTIAL (some valid, some invalid), REJECTED (0 valid)
+    if valid_rows == 0:
+        upload_job.status = "REJECTED"
+    elif valid_rows < total_rows:
+        upload_job.status = "PARTIAL"
     else:
         upload_job.status = "COMPLETED"
 
     upload_job.total_rows = total_rows
     upload_job.processed_rows = valid_rows
-    upload_job.completed_at = datetime.utcnow()
+    upload_job.completed_at = datetime.now(timezone.utc)
 
     # Update dataset summary
     target_dataset.row_count = (target_dataset.row_count or 0) + valid_rows
@@ -442,7 +520,7 @@ def upload_sales(
     if max_date and (target_dataset.date_max is None or max_date > target_dataset.date_max):
         target_dataset.date_max = max_date
 
-    # Add validation checks
+    # Validation records
     validation_checks = [
         ("required_columns", "PASS", "All required columns are present."),
         ("date_validation", "PASS" if error_breakdown["bad_date"] == 0 else "WARNING", f"Bad dates: {error_breakdown['bad_date']}"),
@@ -454,6 +532,12 @@ def upload_sales(
         db.add(ValidationResult(upload_id=upload_job.id, check_name=check_name, status=check_status, details=details))
 
     db.commit()
+
+    # Sync Parquet to DuckDB OLAP (Prompt 1.5)
+    try:
+        sync_dataset_to_duckdb(target_dataset.id, db)
+    except Exception as d_err:
+        print(f"DuckDB Parquet sync notice: {d_err}")
 
     # Trigger elasticity retrain
     try:
@@ -470,11 +554,231 @@ def upload_sales(
         "status": upload_job.status,
         "total_rows": total_rows,
         "valid_rows": valid_rows,
+        "invalid_rows": total_rows - valid_rows,
         "error_rows": total_rows - valid_rows,
         "error_breakdown": error_breakdown,
+        "sample_errors": sample_errors[:10],
+        "unmapped_skus": list(unmapped_skus)[:50],
         "suggested_mappings": suggested_mappings[:50],
         "message": "File processed successfully.",
         "created_at": upload_job.created_at,
+    }
+
+
+@router.get("/{upload_id}/failed-rows")
+def download_failed_rows(upload_id: int, db: Session = Depends(get_db)):
+    """
+    Downloads original CSV rows that failed validation, with an appended error_reason column.
+    """
+    failed_rows = load_failed_rows(upload_id)
+    if not failed_rows:
+        raise HTTPException(status_code=404, detail="No failed rows found for this upload job.")
+
+    output = io.StringIO()
+    # Collect all fieldnames
+    fieldnames = list(failed_rows[0].keys())
+    if "error_reason" not in fieldnames:
+        fieldnames.append("error_reason")
+
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in failed_rows:
+        writer.writerow(row)
+
+    csv_data = output.getvalue()
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="failed_rows_upload_{upload_id}.csv"'
+        }
+    )
+
+
+@router.post("/{upload_id}/resolve-skus")
+def resolve_skus_and_reingest(
+    upload_id: int,
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """
+    Persists user SKU resolutions to sku_mappings and re-ingests previously failed rows.
+    """
+    upload_job = db.query(UploadJob).filter(UploadJob.id == upload_id).first()
+    if not upload_job:
+        raise HTTPException(status_code=404, detail="Upload job not found.")
+
+    failed_rows = load_failed_rows(upload_id)
+    if not failed_rows:
+        raise HTTPException(status_code=400, detail="No failed rows available to resolve.")
+
+    mappings = payload.get("mappings", [])
+    if not mappings:
+        raise HTTPException(status_code=400, detail="No SKU mappings provided.")
+
+    # Find the dataset associated with this upload
+    sample_tx = db.query(SalesTransaction).filter(SalesTransaction.upload_job_id == upload_id).first()
+    if sample_tx:
+        dataset_id = sample_tx.dataset_id
+    else:
+        dataset = resolve_dataset(db, None, None)
+        dataset_id = dataset.id
+
+    mapping_dict = {}
+    for m in mappings:
+        ext_sku = m.get("external_sku") or m.get("raw_sku") or m.get("sku")
+        action = m.get("action") or ("create_new" if m.get("create_new") else "map")
+        int_id = m.get("internal_product_id") or m.get("resolved_product_id")
+
+        if not ext_sku:
+            continue
+
+        if action == "create_new" or not int_id:
+            # Create provisional product
+            int_id = ext_sku
+            prod = db.query(Product).filter(Product.product_id == int_id).first()
+            if not prod:
+                new_p = Product(
+                    product_id=int_id,
+                    product_name=ext_sku,
+                    l0_category="Uncategorized",
+                    is_provisional=True,
+                    source_upload_job_id=upload_job.id,
+                    is_active=True
+                )
+                db.add(new_p)
+                db.flush()
+
+        # Add or update sku_mapping
+        sku_map = db.query(SkuMapping).filter(
+            SkuMapping.dataset_id == dataset_id,
+            SkuMapping.external_sku == ext_sku
+        ).first()
+
+        if sku_map:
+            sku_map.internal_product_id = int_id
+            sku_map.mapping_method = "manual"
+        else:
+            sku_map = SkuMapping(
+                dataset_id=dataset_id,
+                external_sku=ext_sku,
+                internal_product_id=int_id,
+                confidence=1.0,
+                mapping_method="manual"
+            )
+            db.add(sku_map)
+
+        mapping_dict[ext_sku] = int_id
+
+    db.commit()
+
+    # Re-ingest failed rows matching the resolved SKUs
+    still_failed = []
+    reingested_count = 0
+    new_sales = []
+    agg_map = {}
+
+    for row in failed_rows:
+        ext_sku = (row.get("product_id") or "").strip()
+        if ext_sku in mapping_dict and row.get("error_reason") == "unmapped_sku":
+            resolved_pid = mapping_dict[ext_sku]
+            parsed_d = parse_date(row.get("date_") or row.get("date"))
+            qty = parse_float(row.get("procured_quantity"))
+            price = parse_float(row.get("unit_selling_price"))
+            disc = parse_float(row.get("total_discount_amount")) or 0.0
+
+            if parsed_d and qty is not None and price is not None:
+                city = row.get("city_name", "ALL")
+                tx = SalesTransaction(
+                    dataset_id=dataset_id,
+                    upload_id=upload_job.id,
+                    upload_job_id=upload_job.id,
+                    date_=parsed_d,
+                    city_name=city,
+                    order_id=row.get("order_id"),
+                    cart_id=row.get("cart_id"),
+                    dim_customer_key=row.get("dim_customer_key"),
+                    procured_quantity=qty,
+                    unit_selling_price=price,
+                    total_discount_amount=disc,
+                    product_id=resolved_pid,
+                    total_weighted_landing_price=parse_float(row.get("total_weighted_landing_price")),
+                )
+                new_sales.append(tx)
+                reingested_count += 1
+
+                agg_key = (parsed_d, resolved_pid, city)
+                if agg_key not in agg_map:
+                    agg_map[agg_key] = {"quantity": 0.0, "revenue": 0.0, "discount": 0.0, "orders": set()}
+                agg_map[agg_key]["quantity"] += qty
+                agg_map[agg_key]["revenue"] += (qty * price)
+                agg_map[agg_key]["discount"] += disc
+                if row.get("order_id"):
+                    agg_map[agg_key]["orders"].add(row.get("order_id"))
+                continue
+
+        still_failed.append(row)
+
+    if new_sales:
+        db.add_all(new_sales)
+
+    for (d_date, p_id, city), metrics in agg_map.items():
+        existing = db.query(DailyProductDemand).filter(
+            DailyProductDemand.dataset_id == dataset_id,
+            DailyProductDemand.date_ == d_date,
+            DailyProductDemand.product_id == p_id,
+            DailyProductDemand.city_name == city
+        ).first()
+
+        if existing:
+            existing.total_quantity += metrics["quantity"]
+            existing.total_sales_value += metrics["revenue"]
+            existing.total_discount_value += metrics["discount"]
+            existing.order_count += len(metrics["orders"])
+            if existing.total_quantity > 0:
+                existing.avg_unit_price = round(existing.total_sales_value / existing.total_quantity, 2)
+        else:
+            unit_p = round(metrics["revenue"] / metrics["quantity"], 2) if metrics["quantity"] > 0 else 0.0
+            new_demand = DailyProductDemand(
+                dataset_id=dataset_id,
+                upload_job_id=upload_job.id,
+                date_=d_date,
+                product_id=p_id,
+                city_name=city,
+                total_quantity=metrics["quantity"],
+                total_sales_value=metrics["revenue"],
+                total_discount_value=metrics["discount"],
+                avg_unit_price=unit_p,
+                order_count=len(metrics["orders"])
+            )
+            db.add(new_demand)
+
+    # Update upload job and failed rows cache
+    upload_job.processed_rows = (upload_job.processed_rows or 0) + reingested_count
+    if len(still_failed) == 0:
+        upload_job.status = "COMPLETED"
+    elif upload_job.processed_rows > 0:
+        upload_job.status = "PARTIAL"
+    upload_job.completed_at = datetime.now(timezone.utc)
+
+    save_failed_rows(upload_job.id, still_failed)
+    db.commit()
+
+    # Re-sync Parquet
+    try:
+        sync_dataset_to_duckdb(dataset_id, db)
+    except Exception:
+        pass
+
+    return {
+        "status": "success",
+        "job_status": upload_job.status,
+        "re_ingested_rows": reingested_count,
+        "reingested_rows": reingested_count,
+        "remaining_errors": len(still_failed),
+        "remaining_failed_rows": len(still_failed),
+        "total_valid_rows": upload_job.processed_rows,
+        "message": f"Successfully resolved and ingested {reingested_count} rows."
     }
 
 

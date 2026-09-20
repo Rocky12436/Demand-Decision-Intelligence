@@ -42,6 +42,7 @@ class InventoryRecommendation(Base):
     recommended_order_qty = Column(Float, nullable=False, default=0.0)
     risk_status = Column(String(50), nullable=False, default="OPTIMAL", index=True)
     priority = Column(String(20), nullable=False, default="MEDIUM")
+    is_stale = Column(Boolean, nullable=False, default=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     product = relationship("Product", back_populates="inventory_recommendations")

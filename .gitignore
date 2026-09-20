@@ -11,6 +11,8 @@ dataset/combined/fact_sales_combined.csv
 # Cleaned / processed datasets
 dataset/cleaned/*.csv
 dataset/processed/
+dataset/*.parquet
+dataset/failed_rows/
 
 # ===========================
 # Python

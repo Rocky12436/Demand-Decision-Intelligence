@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Date, DateTime, ForeignKey, Text, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey, Text, UniqueConstraint, Index
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from backend.db.session import Base
@@ -11,6 +11,10 @@ class ForecastRun(Base):
     model_name = Column(String(100), nullable=False, index=True)  # Prophet, MovingAverage_7D, Naive
     horizon_days = Column(Integer, nullable=False, default=14)  # 7, 14, 30
     status = Column(String(50), nullable=False, default="RUNNING", index=True)  # RUNNING, COMPLETED, FAILED
+    is_stale = Column(Boolean, nullable=False, default=False, index=True)
+    superseded_by = Column(Integer, ForeignKey("forecast_runs.id", ondelete="SET NULL"), nullable=True)
+    source_upload_job_id = Column(Integer, ForeignKey("upload_jobs.id", ondelete="SET NULL"), nullable=True)
+    data_date_max = Column(Date, nullable=True)
     start_date = Column(Date, nullable=True)
     end_date = Column(Date, nullable=True)
     metrics_summary = Column(Text, nullable=True)  # JSON summary of metrics
@@ -21,6 +25,7 @@ class ForecastRun(Base):
     dataset = relationship("Dataset", back_populates="forecast_runs")
     forecast_items = relationship("ForecastItem", back_populates="run", cascade="all, delete-orphan")
     evaluations = relationship("ForecastEvaluation", back_populates="run", cascade="all, delete-orphan")
+    source_upload_job = relationship("UploadJob", backref="forecast_runs")
 
 class ForecastItem(Base):
     __tablename__ = "forecasts"

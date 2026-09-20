@@ -36,14 +36,66 @@ export async function uploadSalesFile(file) {
     }
   );
 
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(
-      data.detail || "Sales upload failed"
-    );
+  let data;
+  try {
+    data = await response.json();
+  } catch (e) {
+    throw new Error("Invalid response format from server");
   }
 
+  if (!response.ok) {
+    // If backend returns a structured validation response (e.g. 422 with REJECTED status, unmapped_skus, or error_breakdown)
+    if (data && (data.status || data.error_breakdown || data.unmapped_skus)) {
+      return data;
+    }
+    throw new Error(data.detail || "Sales upload failed");
+  }
+
+  return data;
+}
+
+export async function resolveSkus(uploadId, mappings) {
+  const response = await fetch(`${API_BASE_URL}/upload/${uploadId}/resolve-skus`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ mappings }),
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || "Failed to resolve SKUs");
+  }
+  return data;
+}
+
+export async function getProducts(limit = 100) {
+  const response = await fetch(`${API_BASE_URL}/products?limit=${limit}`);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "Failed to fetch products");
+  return data.products || [];
+}
+
+export function getFailedRowsDownloadUrl(uploadId) {
+  return `${API_BASE_URL}/upload/${uploadId}/failed-rows`;
+}
+
+export async function recomputeForecast(datasetId = null, productIds = null) {
+  const response = await fetch(`${API_BASE_URL}/forecast/recompute`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      dataset_id: datasetId,
+      product_ids: productIds,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || "Failed to recompute forecast");
+  }
   return data;
 }
 

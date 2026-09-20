@@ -24,7 +24,7 @@ import {
   Activity,
   History,
 } from 'lucide-react';
-import api from '../../services/api';
+import api, { recomputeForecast } from '../../services/api';
 
 const HORIZONS = [7, 14, 30];
 const AVAILABLE_MODELS = [
@@ -49,6 +49,7 @@ export default function ForecastPage() {
   const [runningForecast, setRunningForecast] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [freshness, setFreshness] = useState(null);
 
   // 1. Initial Load: Fetch top products & existing runs
   useEffect(() => {
@@ -66,6 +67,12 @@ export default function ForecastPage() {
         if (!pIds.includes(selectedProduct)) {
           setSelectedProduct(pIds[0]);
         }
+      }
+
+      // Fetch base forecast freshness
+      const fRes = await api.get('/api/forecast').catch(() => null);
+      if (fRes?.data?.freshness) {
+        setFreshness(fRes.data.freshness);
       }
 
       // Fetch existing forecast runs
@@ -108,13 +115,44 @@ export default function ForecastPage() {
       try {
         const { data } = await api.get(`/api/forecast/${match.id}`);
         setActiveRunDetail(data);
+        if (data?.freshness) {
+          setFreshness(data.freshness);
+        }
       } catch (err) {
         console.error('Failed to fetch run details', err);
       } finally {
         setChartLoading(false);
       }
     } else {
+      // Try SKU level dynamic forecast
+      try {
+        const { data } = await api.get(`/api/forecast?product_id=${selectedProduct}&horizon_days=${selectedHorizon}`);
+        if (data?.freshness) {
+          setFreshness(data.freshness);
+        }
+      } catch (err) {
+        // ignore
+      }
       setActiveRunDetail(null);
+    }
+  };
+
+  const handleRecomputeNow = async () => {
+    setRunningForecast(true);
+    setFeedbackMsg('Recomputing forecast synchronously...');
+    setErrorMsg('');
+    try {
+      const res = await recomputeForecast(null, [selectedProduct]);
+      if (res?.freshness) {
+        setFreshness(res.freshness);
+      }
+      setFeedbackMsg(`Forecast recomputed successfully for SKU ${selectedProduct}!`);
+      await loadRuns();
+      await loadSelectedRunDetail();
+    } catch (err) {
+      setErrorMsg(err.message || 'Recompute failed');
+    } finally {
+      setRunningForecast(false);
     }
   };
 
@@ -559,6 +597,34 @@ export default function ForecastPage() {
             No forecast points available for this product and model combination. Click <strong>"Run Forecast"</strong> above to generate forecasts.
           </div>
         )}
+
+        {/* Freshness & Staleness Metadata Caption */}
+        <div style={{ marginTop: '1.25rem', paddingTop: '0.85rem', borderTop: '1px solid var(--border-subtle)', display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+          <div>
+            Computed {freshness?.computed_at ? new Date(freshness.computed_at).toISOString().replace('T', ' ').slice(0, 16) : new Date().toISOString().slice(0, 16)} from data through {freshness?.data_through || 'latest'} (model: {freshness?.model_name || activeModelTab})
+            {' · '}
+            <button
+              onClick={handleRecomputeNow}
+              disabled={runningForecast}
+              style={{ background: 'none', border: 'none', color: 'var(--accent-primary)', cursor: 'pointer', textDecoration: 'underline', padding: 0, fontSize: '0.82rem' }}
+            >
+              [Recompute now]
+            </button>
+          </div>
+
+          {freshness?.is_stale && (
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', padding: '0.3rem 0.75rem', borderRadius: '6px', backgroundColor: 'rgba(245, 158, 11, 0.15)', border: '1px solid var(--accent-amber)', color: 'var(--accent-amber)', fontWeight: 500, fontSize: '0.78rem' }}>
+              <span>⚠ Data has updated since this forecast was generated — recompute recommended</span>
+              <button
+                onClick={handleRecomputeNow}
+                disabled={runningForecast}
+                style={{ backgroundColor: 'var(--accent-amber)', color: '#000', border: 'none', borderRadius: '4px', padding: '0.2rem 0.5rem', fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer' }}
+              >
+                Recompute
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Runs History Table */}

@@ -12,7 +12,7 @@ import {
   Layers,
   ArrowUpDown
 } from 'lucide-react';
-import api from '../../services/api';
+import api, { recomputeForecast } from '../../services/api';
 
 const Z_SCORES = {
   0.90: 1.282,
@@ -23,6 +23,8 @@ const Z_SCORES = {
 
 export default function InventoryPage() {
   const [data, setData] = useState([]);
+  const [freshness, setFreshness] = useState(null);
+  const [recomputing, setRecomputing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [searchSKU, setSearchSKU] = useState('');
   const [selectedCity, setSelectedCity] = useState('ALL');
@@ -46,6 +48,9 @@ export default function InventoryPage() {
       if (res?.data?.data) {
         setData(res.data.data);
       }
+      if (res?.data?.freshness) {
+        setFreshness(res.data.freshness);
+      }
     } catch (err) {
       console.error('Failed to load inventory recommendations', err);
       // Fallback sample data if backend endpoint is unavailable
@@ -59,6 +64,18 @@ export default function InventoryPage() {
       ]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRecomputeNow = async () => {
+    setRecomputing(true);
+    try {
+      await recomputeForecast();
+      await loadInventoryData();
+    } catch (err) {
+      console.error('Recompute failed', err);
+    } finally {
+      setRecomputing(false);
     }
   };
 
@@ -427,6 +444,34 @@ export default function InventoryPage() {
           {filteredData.length === 0 && !loading && (
             <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
               No inventory records match the selected filter.
+            </div>
+          )}
+        </div>
+
+        {/* Freshness & Staleness Metadata Caption */}
+        <div style={{ marginTop: '1.25rem', paddingTop: '0.85rem', borderTop: '1px solid var(--border-subtle)', display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+          <div>
+            Computed {freshness?.computed_at ? new Date(freshness.computed_at).toISOString().replace('T', ' ').slice(0, 16) : new Date().toISOString().slice(0, 16)} from data through {freshness?.data_through || 'latest'} (model: {freshness?.model_name || 'EOQ_SafetyStock_95'})
+            {' · '}
+            <button
+              onClick={handleRecomputeNow}
+              disabled={recomputing}
+              style={{ background: 'none', border: 'none', color: 'var(--accent-primary)', cursor: 'pointer', textDecoration: 'underline', padding: 0, fontSize: '0.82rem' }}
+            >
+              [Recompute now]
+            </button>
+          </div>
+
+          {freshness?.is_stale && (
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', padding: '0.3rem 0.75rem', borderRadius: '6px', backgroundColor: 'rgba(245, 158, 11, 0.15)', border: '1px solid var(--accent-amber)', color: 'var(--accent-amber)', fontWeight: 500, fontSize: '0.78rem' }}>
+              <span>⚠ Data has updated since this inventory policy was generated — recompute recommended</span>
+              <button
+                onClick={handleRecomputeNow}
+                disabled={recomputing}
+                style={{ backgroundColor: 'var(--accent-amber)', color: '#000', border: 'none', borderRadius: '4px', padding: '0.2rem 0.5rem', fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer' }}
+              >
+                Recompute
+              </button>
             </div>
           )}
         </div>

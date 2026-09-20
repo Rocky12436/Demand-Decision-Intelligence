@@ -21,6 +21,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 REPORTS_DIR = PROJECT_ROOT / "reports"
 
 
+from datetime import datetime, timezone
+from sqlalchemy import func
+from backend.models.inventory import InventoryRecommendation
+from backend.models.upload import UploadJob
+
 @router.get("/recommendations")
 def get_inventory_recommendations(
     product_id: Optional[str] = None,
@@ -36,8 +41,27 @@ def get_inventory_recommendations(
     otherwise returns precomputed deliverable sample dataset.
     """
     target_dataset = resolve_dataset(db, None, dataset_id)
+    latest_job = (
+        db.query(UploadJob.id)
+        .filter(UploadJob.status == "COMPLETED")
+        .order_by(UploadJob.id.desc())
+        .first()
+    )
+    latest_upload_id = latest_job[0] if latest_job else None
 
     if product_id:
+        # Check staleness in DB
+        stale_rec = (
+            db.query(InventoryRecommendation)
+            .filter(
+                InventoryRecommendation.dataset_id == target_dataset.id,
+                InventoryRecommendation.product_id == str(product_id),
+                InventoryRecommendation.is_stale == True
+            )
+            .first()
+        )
+        is_stale = stale_rec is not None
+
         query = db.query(DailyProductDemand).filter(
             DailyProductDemand.dataset_id == target_dataset.id,
             DailyProductDemand.product_id == str(product_id)
@@ -81,7 +105,14 @@ def get_inventory_recommendations(
                 "status": "success",
                 "dataset_id": target_dataset.id,
                 "total_returned": 1,
-                "data": [rec]
+                "data": [rec],
+                "freshness": {
+                    "computed_at": datetime.now(timezone.utc).isoformat(),
+                    "data_through": records[-1].date_.isoformat() if records else None,
+                    "is_stale": is_stale,
+                    "model_name": "EOQ_SafetyStock_95",
+                    "source_upload_job_id": latest_upload_id
+                }
             }
 
     sample_file = REPORTS_DIR / "inventory_decision_sample.csv"
@@ -100,7 +131,14 @@ def get_inventory_recommendations(
         "status": "success",
         "dataset_id": target_dataset.id,
         "total_returned": len(res_slice),
-        "data": res_slice
+        "data": res_slice,
+        "freshness": {
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "data_through": target_dataset.date_max.isoformat() if target_dataset.date_max else None,
+            "is_stale": False,
+            "model_name": "EOQ_SafetyStock_95",
+            "source_upload_job_id": latest_upload_id
+        }
     }
 
 

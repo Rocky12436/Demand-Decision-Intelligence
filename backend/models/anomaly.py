@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Date, DateTime, ForeignKey, Text, Index
+from sqlalchemy import Column, Integer, String, Float, Boolean, Date, DateTime, ForeignKey, Text, Index
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from backend.db.session import Base
@@ -18,6 +18,7 @@ class AnomalyAlert(Base):
     expected_value = Column(Float, nullable=True)
     description = Column(Text, nullable=True)
     status = Column(String(50), nullable=False, default="OPEN", index=True)  # OPEN, INVESTIGATING, RESOLVED, DISMISSED
+    is_stale = Column(Boolean, nullable=False, default=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     product = relationship("Product", back_populates="anomalies")
