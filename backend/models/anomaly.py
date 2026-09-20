@@ -7,7 +7,7 @@ class AnomalyAlert(Base):
     __tablename__ = "anomalies"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    product_id = Column(BigInteger, ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(String(100), ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
     city_name = Column(String(100), nullable=False, default="ALL", index=True)
     anomaly_date = Column(Date, nullable=False, index=True)
     anomaly_type = Column(String(50), nullable=False, index=True)  # SPIKE, DROP, PRICE_DISCREPANCY, ZERO_STOCK_SURGE

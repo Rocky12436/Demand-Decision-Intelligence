@@ -6,7 +6,7 @@ from backend.db.session import Base
 class SalesTransaction(Base):
     __tablename__ = "sales"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     upload_id = Column(Integer, ForeignKey("upload_jobs.id", ondelete="SET NULL"), nullable=True, index=True)
     date_ = Column(Date, nullable=False, index=True)
     city_name = Column(String(100), nullable=True, index=True)
@@ -16,7 +16,7 @@ class SalesTransaction(Base):
     procured_quantity = Column(Float, nullable=False, default=1.0)
     unit_selling_price = Column(Float, nullable=False)
     total_discount_amount = Column(Float, nullable=False, default=0.0)
-    product_id = Column(BigInteger, ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(String(100), ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
     total_weighted_landing_price = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

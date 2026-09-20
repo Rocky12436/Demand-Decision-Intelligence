@@ -6,7 +6,7 @@ from backend.db.session import Base
 class Product(Base):
     __tablename__ = "products"
 
-    product_id = Column(BigInteger, primary_key=True, index=True)
+    product_id = Column(String(100), primary_key=True, index=True)
     product_name = Column(String(500), nullable=False, index=True)
     unit = Column(String(100), nullable=True)
     product_type = Column(String(100), nullable=True)

@@ -6,8 +6,8 @@ from backend.db.session import Base
 class InventoryState(Base):
     __tablename__ = "inventory"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    product_id = Column(BigInteger, ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    product_id = Column(String(100), ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
     city_name = Column(String(100), nullable=False, default="ALL", index=True)
     snapshot_date = Column(Date, nullable=False, index=True)
     opening_stock = Column(Float, nullable=False, default=0.0)
@@ -27,8 +27,8 @@ class InventoryState(Base):
 class InventoryRecommendation(Base):
     __tablename__ = "inventory_recommendations"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    product_id = Column(BigInteger, ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    product_id = Column(String(100), ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
     city_name = Column(String(100), nullable=False, default="ALL", index=True)
     calculation_date = Column(Date, nullable=False, index=True)
     current_stock = Column(Float, nullable=False, default=0.0)

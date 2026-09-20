@@ -23,9 +23,9 @@ class ForecastRun(Base):
 class ForecastItem(Base):
     __tablename__ = "forecasts"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     run_id = Column(Integer, ForeignKey("forecast_runs.id", ondelete="CASCADE"), nullable=False, index=True)
-    product_id = Column(BigInteger, ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(String(100), ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
     city_name = Column(String(100), nullable=False, default="ALL", index=True)
     forecast_date = Column(Date, nullable=False, index=True)
     predicted_demand = Column(Float, nullable=False)

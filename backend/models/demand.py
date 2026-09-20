@@ -6,9 +6,9 @@ from backend.db.session import Base
 class DailyProductDemand(Base):
     __tablename__ = "daily_product_demand"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     date_ = Column(Date, nullable=False, index=True)
-    product_id = Column(BigInteger, ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(String(100), ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
     city_name = Column(String(100), nullable=False, default="ALL", index=True)
     total_quantity = Column(Float, nullable=False, default=0.0)
     total_sales_value = Column(Float, nullable=False, default=0.0)
