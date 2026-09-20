@@ -141,7 +141,7 @@ def process_sales_upload_background(upload_id: int, text: str):
                     new_product = Product(
                         product_id=product_id,
                         product_name=f"Product {product_id}",
-                        category="General",
+                        l0_category="General",
                         is_active=True
                     )
                     db.add(new_product)
