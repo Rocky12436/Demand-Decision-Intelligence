@@ -8,6 +8,7 @@ import RegisterPage from './pages/auth/RegisterPage';
 import AuthTestPage from './pages/auth/AuthTestPage';
 import OverviewPage from './pages/dashboard/OverviewPage';
 import UploadPage from './pages/upload/UploadPage';
+import PriceInsightsPage from './pages/pricing/PriceInsightsPage';
 import GenericPage from './pages/common/GenericPage';
 import './styles/main.css';
 
@@ -39,7 +40,7 @@ export default function App() {
             />
             <Route 
               path="/price-insights" 
-              element={<GenericPage title="Price Insights" description="Price elasticity modeling and optimal discount recommendations." />} 
+              element={<PriceInsightsPage />} 
             />
             <Route 
               path="/evaluation" 
