@@ -11,6 +11,7 @@ import {
   Bot,
   LogOut,
   KeyRound,
+  Zap,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
@@ -21,6 +22,7 @@ const navItems = [
   { name: 'Inventory',     path: '/inventory',      icon: Boxes },
   { name: 'Trends',        path: '/trends',         icon: LineChart },
   { name: 'Price Insights',path: '/price-insights', icon: Tag },
+  { name: 'Market Rates',  path: '/market-prices',  icon: Zap },
   { name: 'Evaluation',    path: '/evaluation',     icon: ShieldCheck },
   { name: 'Assistant',     path: '/assistant',      icon: Bot },
   { name: 'Auth Testing',  path: '/auth-test',      icon: KeyRound },
