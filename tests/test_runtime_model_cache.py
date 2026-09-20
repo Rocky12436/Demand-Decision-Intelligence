@@ -95,7 +95,7 @@ def test_runtime_cache_hit_and_automatic_refit_on_data_append():
     assert resp1.status_code == 200
     data1 = resp1.json()
 
-    key_initial = GLOBAL_MODEL_REGISTRY.get_key(ds_id, "SKU-CACHE-1", date(2024, 5, 10), "Prophet_MovingAvg_Ensemble")
+    key_initial = GLOBAL_MODEL_REGISTRY.get_key(ds_id, "SKU-CACHE-1", date(2024, 5, 10), data1["model_name"])
     assert GLOBAL_MODEL_REGISTRY.refit_counts[key_initial] == 1
     assert GLOBAL_MODEL_REGISTRY.total_fits == 1
     assert GLOBAL_MODEL_REGISTRY.total_hits == 0
@@ -137,7 +137,7 @@ def test_runtime_cache_hit_and_automatic_refit_on_data_append():
     assert resp3.status_code == 200
     data3 = resp3.json()
 
-    key_updated = GLOBAL_MODEL_REGISTRY.get_key(ds_id, "SKU-CACHE-1", date(2024, 5, 11), "Prophet_MovingAvg_Ensemble")
+    key_updated = GLOBAL_MODEL_REGISTRY.get_key(ds_id, "SKU-CACHE-1", date(2024, 5, 11), data3["model_name"])
     assert key_updated != key_initial
     assert GLOBAL_MODEL_REGISTRY.refit_counts[key_updated] == 1
     assert GLOBAL_MODEL_REGISTRY.total_fits == 2

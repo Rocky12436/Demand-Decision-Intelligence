@@ -52,3 +52,26 @@ class InventoryRecommendation(Base):
         Index("idx_inv_rec_risk", "risk_status", "priority"),
         Index("idx_inv_rec_dataset_id", "dataset_id"),
     )
+
+
+class LeadTimeObservation(Base):
+    __tablename__ = "lead_time_observations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(String(100), ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
+    supplier_id = Column(String(100), nullable=True, index=True)
+    po_id = Column(String(100), nullable=True)
+    promised_days = Column(Integer, nullable=False)
+    actual_days = Column(Integer, nullable=False)
+    ordered_at = Column(DateTime(timezone=True), nullable=False)
+    received_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    product = relationship("Product", backref="lead_time_observations")
+    dataset = relationship("Dataset", backref="lead_time_observations")
+
+    __table_args__ = (
+        Index("idx_lto_prod_supplier", "product_id", "supplier_id"),
+        Index("idx_lto_dataset", "dataset_id"),
+    )

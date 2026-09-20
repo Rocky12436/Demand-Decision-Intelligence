@@ -18,6 +18,8 @@ class AnomalyAlert(Base):
     expected_value = Column(Float, nullable=True)
     description = Column(Text, nullable=True)
     status = Column(String(50), nullable=False, default="OPEN", index=True)  # OPEN, INVESTIGATING, RESOLVED, DISMISSED
+    detection_method = Column(String(100), nullable=True)  # MODIFIED_Z_MAD, COUNT_MODEL_NEGBINOMIAL, INTERARRIVAL_GAP_SILENCE
+    confidence = Column(String(20), nullable=True, default="MEDIUM")  # HIGH, MEDIUM, LOW, INSUFFICIENT_HISTORY
     is_stale = Column(Boolean, nullable=False, default=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

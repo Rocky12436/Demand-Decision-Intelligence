@@ -51,6 +51,9 @@ export default function ForecastPage() {
   const [errorMsg, setErrorMsg] = useState('');
   const [freshness, setFreshness] = useState(null);
   const [historicalWarning, setHistoricalWarning] = useState(null);
+  const [modelFallbackReason, setModelFallbackReason] = useState(null);
+  const [confidenceTier, setConfidenceTier] = useState(null);
+  const [effectiveModel, setEffectiveModel] = useState(null);
 
   // 1. Initial Load: Fetch top products & existing runs
   useEffect(() => {
@@ -122,6 +125,9 @@ export default function ForecastPage() {
         if (data?.freshness) {
           setFreshness(data.freshness);
         }
+        setModelFallbackReason(data?.model_fallback_reason || data?.freshness?.model_fallback_reason || null);
+        setConfidenceTier(data?.confidence_tier || data?.freshness?.confidence_tier || null);
+        setEffectiveModel(data?.model_name || null);
       } catch (err) {
         console.error('Failed to fetch run details', err);
       } finally {
@@ -130,17 +136,22 @@ export default function ForecastPage() {
     } else {
       // Try SKU level dynamic forecast
       try {
-        const { data } = await api.get(`/api/forecast?product_id=${selectedProduct}&horizon_days=${selectedHorizon}`);
+        const { data } = await api.get(`/api/forecast?product_id=${selectedProduct}&horizon_days=${selectedHorizon}&model_name=${activeModelTab}`);
         if (data?.freshness) {
           setFreshness(data.freshness);
         }
         if (data?.historical_warning) {
           setHistoricalWarning(data.historical_warning);
         }
+        setModelFallbackReason(data?.model_fallback_reason || null);
+        setConfidenceTier(data?.confidence_tier || null);
+        setEffectiveModel(data?.model_name || null);
+        if (data?.forecast) {
+          setActiveRunDetail(data);
+        }
       } catch (err) {
         // ignore
       }
-      setActiveRunDetail(null);
     }
   };
 
@@ -496,8 +507,21 @@ export default function ForecastPage() {
               <Activity size={20} color={AVAILABLE_MODELS.find((m) => m.id === activeModelTab)?.color || '#3b82f6'} />
               Time Series Prediction Curve & 80% Confidence Interval
             </h3>
-            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '0.2rem' }}>
-              Showing {activeModelTab.toUpperCase()} model | Product SKU #{selectedProduct} | {selectedHorizon}-Day Horizon
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '0.2rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+              <span>Showing {effectiveModel ? effectiveModel.toUpperCase() : activeModelTab.toUpperCase()} model | Product SKU #{selectedProduct} | {selectedHorizon}-Day Horizon</span>
+              {confidenceTier && (
+                <span style={{
+                  fontSize: '0.72rem',
+                  fontWeight: 700,
+                  padding: '0.15rem 0.5rem',
+                  borderRadius: '4px',
+                  backgroundColor: confidenceTier === 'HIGH' ? 'rgba(16, 185, 129, 0.2)' : confidenceTier === 'MEDIUM' ? 'rgba(245, 158, 11, 0.2)' : 'rgba(239, 68, 68, 0.2)',
+                  color: confidenceTier === 'HIGH' ? 'var(--accent-emerald)' : confidenceTier === 'MEDIUM' ? 'var(--accent-amber)' : 'var(--accent-rose)',
+                  border: `1px solid ${confidenceTier === 'HIGH' ? 'var(--accent-emerald)' : confidenceTier === 'MEDIUM' ? 'var(--accent-amber)' : 'var(--accent-rose)'}`
+                }}>
+                  Confidence: {confidenceTier}
+                </span>
+              )}
             </p>
           </div>
 
@@ -631,6 +655,31 @@ export default function ForecastPage() {
         ) : (
           <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--text-muted)' }}>
             No forecast points available for this product and model combination. Click <strong>"Run Forecast"</strong> above to generate forecasts.
+          </div>
+        )}
+
+        {/* Model Sufficiency Fallback Alert Banner */}
+        {modelFallbackReason && (
+          <div style={{
+            marginTop: '1.25rem',
+            padding: '0.75rem 1rem',
+            borderRadius: '8px',
+            backgroundColor: 'rgba(245, 158, 11, 0.12)',
+            border: '1px solid rgba(245, 158, 11, 0.4)',
+            color: '#fbbf24',
+            fontSize: '0.84rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.65rem'
+          }}>
+            <AlertCircle size={18} style={{ flexShrink: 0, color: '#f59e0b' }} />
+            <div>
+              <strong style={{ color: '#f59e0b' }}>Model History Guard Triggered ({confidenceTier || 'LOW'} Confidence): </strong>
+              <span>{modelFallbackReason}</span>
+              <div style={{ fontSize: '0.76rem', color: '#fef3c7', marginTop: '0.2rem' }}>
+                Prediction intervals have been widened to ±30% to honestly reflect estimation uncertainty on limited history.
+              </div>
+            </div>
           </div>
         )}
 

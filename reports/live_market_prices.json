@@ -1,7 +1,7 @@
 {
   "status": "live",
   "as_on_date": "20/09/2026",
-  "fetched_at": "2026-09-20T22:15:51.379270",
+  "fetched_at": "2026-09-20T18:00:40.973388+00:00",
   "total_commodities": 41,
   "source_url": "https://fcainfoweb.nic.in/Default.aspx",
   "commodities": [
@@ -333,5 +333,8 @@
       "as_on_date": "20/09/2026",
       "source": "Ministry of Consumer Affairs, Food and Public Distribution (PMD)"
     }
-  ]
+  ],
+  "is_stale": false,
+  "stale_days": 0,
+  "suppress_stocking_decisions": false
 }

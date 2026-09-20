@@ -87,11 +87,18 @@ export default function InventoryPage() {
     return data.map((item) => {
       const mean = Number(item.mean_daily_demand) || 0;
       const std = Number(item.std_daily_demand) || 0;
+      const sigmaL = item.sigma_lead_time_days != null ? Number(item.sigma_lead_time_days) : (0.25 * lt);
+      const ltConfidence = item.lead_time_confidence || (item.lead_time_observations_count >= 5 ? 'HIGH' : 'LOW');
 
-      // Dynamic inventory formula
-      const ss = Math.ceil(z * std * Math.sqrt(lt));
-      const rop = Math.ceil(mean * lt + ss);
-      const tsl = Math.ceil(mean * (lt + 7) + ss);
+      // Dynamic inventory formula (King's formula with lead time variability)
+      const varianceDemandTerm = lt * Math.pow(std, 2);
+      const varianceLeadTimeTerm = Math.pow(mean, 2) * Math.pow(sigmaL, 2);
+      const ssKings = Math.ceil(z * Math.sqrt(varianceDemandTerm + varianceLeadTimeTerm));
+      const ssClassical = Math.ceil(z * std * Math.sqrt(lt));
+      const ssDelta = ssKings - ssClassical;
+
+      const rop = Math.ceil(mean * lt + ssKings);
+      const tsl = Math.ceil(mean * (lt + 7) + ssKings);
 
       // Status classification
       let status = 'HEALTHY';
@@ -113,7 +120,11 @@ export default function InventoryPage() {
 
       return {
         ...item,
-        calculated_ss: ss,
+        calculated_ss: ssKings,
+        ss_classical: ssClassical,
+        ss_delta: ssDelta,
+        sigma_lead_time: sigmaL,
+        lead_time_confidence: ltConfidence,
         calculated_rop: rop,
         calculated_tsl: tsl,
         status,
@@ -370,7 +381,7 @@ export default function InventoryPage() {
                   style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.3rem' }}>
-                    Safety Stock (SS) <ArrowUpDown size={12} />
+                    King's SS (Δ vs Classical) <ArrowUpDown size={12} />
                   </div>
                 </th>
                 <th
@@ -404,7 +415,22 @@ export default function InventoryPage() {
                   }}
                 >
                   <td style={{ padding: '0.75rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                    #{row.product_id}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      <span>#{row.product_id}</span>
+                      <span
+                        title={`Lead time confidence: ${row.lead_time_confidence}`}
+                        style={{
+                          fontSize: '0.65rem',
+                          fontWeight: 700,
+                          padding: '0.1rem 0.35rem',
+                          borderRadius: '4px',
+                          backgroundColor: row.lead_time_confidence === 'HIGH' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)',
+                          color: row.lead_time_confidence === 'HIGH' ? 'var(--accent-emerald)' : 'var(--accent-amber)',
+                        }}
+                      >
+                        LT: {row.lead_time_confidence}
+                      </span>
+                    </div>
                   </td>
                   <td style={{ padding: '0.75rem', color: 'var(--text-secondary)' }}>
                     {row.city_name}
@@ -412,8 +438,13 @@ export default function InventoryPage() {
                   <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 500, color: 'var(--text-primary)' }}>
                     {Math.round(row.mean_daily_demand).toLocaleString()}
                   </td>
-                  <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 600, color: 'var(--accent-cyan)' }}>
-                    {row.calculated_ss.toLocaleString()}
+                  <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 600 }}>
+                    <div style={{ color: 'var(--accent-cyan)' }}>{row.calculated_ss.toLocaleString()}</div>
+                    {row.ss_delta != null && row.ss_delta !== 0 && (
+                      <div style={{ fontSize: '0.72rem', color: row.ss_delta > 0 ? '#fbbf24' : '#94a3b8', marginTop: '2px' }}>
+                        {row.ss_delta > 0 ? `+${row.ss_delta.toLocaleString()}` : row.ss_delta.toLocaleString()} vs classical
+                      </div>
+                    )}
                   </td>
                   <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 700, color: 'var(--accent-amber)' }}>
                     {row.calculated_rop.toLocaleString()}

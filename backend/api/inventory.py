@@ -27,18 +27,26 @@ from backend.models.inventory import InventoryRecommendation
 from backend.models.upload import UploadJob
 from backend.services.forecast_service import check_historical_warning
 
+from backend.services.inventory_service import (
+    compute_inventory_recommendation_for_sku,
+    compute_safety_stock_kings,
+    compute_safety_stock_classical,
+)
+
 @router.get("/recommendations")
 def get_inventory_recommendations(
     product_id: Optional[str] = None,
     city_name: Optional[str] = None,
+    supplier_id: Optional[str] = None,
     dataset_id: Optional[int] = Query(default=None),
     as_of: Optional[date] = Query(default=None),
+    use_classical: bool = Query(default=False, description="Use classical constant lead-time formula instead of King's formula"),
     limit: int = Query(default=100, le=1000),
     db: Session = Depends(get_db)
 ):
     """
     Returns calculated inventory optimization recommendations:
-    Safety Stock, Reorder Point (ROP), Target Stock Level (TSL), and Unit Landing Cost.
+    Safety Stock (King's Formula with lead-time variability or classical), Reorder Point (ROP), Target Stock Level (TSL).
     Dynamically computes recommendations from the database scoped to the dataset if product_id is provided,
     otherwise returns precomputed deliverable sample dataset.
     """
@@ -64,62 +72,28 @@ def get_inventory_recommendations(
         )
         is_stale = stale_rec is not None
 
-        query = db.query(DailyProductDemand).filter(
-            DailyProductDemand.dataset_id == target_dataset.id,
-            DailyProductDemand.product_id == str(product_id)
+        rec = compute_inventory_recommendation_for_sku(
+            db=db,
+            target_dataset=target_dataset,
+            product_id=str(product_id),
+            city_name=city_name,
+            supplier_id=supplier_id,
+            as_of=as_of,
+            use_classical=use_classical,
         )
-        if as_of:
-            query = query.filter(DailyProductDemand.date_ <= as_of)
-        if city_name:
-            query = query.filter(DailyProductDemand.city_name == city_name)
-
-        records = query.order_by(DailyProductDemand.date_.asc()).all()
-        if records:
-            quantities = [float(r.total_quantity or 0.0) for r in records]
-            avg_demand = sum(quantities) / len(quantities) if quantities else 0.0
-            variance = sum((q - avg_demand) ** 2 for q in quantities) / len(quantities) if quantities else 0.0
-            std_demand = math.sqrt(variance)
-
-            lead_time_days = 7.0
-            z_score = 1.645  # 95% service level
-            safety_stock = round(z_score * std_demand * math.sqrt(lead_time_days), 2)
-            reorder_point = round((avg_demand * lead_time_days) + safety_stock, 2)
-            target_stock = round(reorder_point + (avg_demand * 7.0), 2)
-
-            avg_price = records[-1].avg_unit_price if records[-1].avg_unit_price else 10.0
-            unit_landing_cost = round(avg_price * 0.8, 2)
-
-            effective_as_of = as_of or records[-1].date_
-            hist_warn = check_historical_warning(effective_as_of)
-
-            rec = {
-                "dataset_id": target_dataset.id,
-                "dataset_name": target_dataset.name,
-                "product_id": str(product_id),
-                "city_name": city_name or (records[0].city_name if records else "Delhi"),
-                "mean_daily_demand": round(avg_demand, 2),
-                "std_daily_demand": round(std_demand, 2),
-                "lead_time_days": lead_time_days,
-                "service_level": 0.95,
-                "safety_stock": safety_stock,
-                "reorder_point": reorder_point,
-                "target_stock_level": target_stock,
-                "unit_landing_cost": unit_landing_cost,
-                "stockout_risk_score": 0.05 if safety_stock > 0 else 0.5,
-                "recommendation": "REORDER" if safety_stock > 0 else "MAINTAIN"
-            }
+        if rec:
             return {
                 "status": "success",
                 "dataset_id": target_dataset.id,
                 "total_returned": 1,
                 "data": [rec],
-                "as_of": effective_as_of.isoformat(),
-                "historical_warning": hist_warn,
+                "as_of": rec["as_of"],
+                "historical_warning": rec["historical_warning"],
                 "freshness": {
                     "computed_at": datetime.now(timezone.utc).isoformat(),
-                    "data_through": records[-1].date_.isoformat() if records else None,
+                    "data_through": rec["as_of"],
                     "is_stale": is_stale,
-                    "model_name": "EOQ_SafetyStock_95",
+                    "model_name": f"King_SafetyStock_95 ({rec['formula_used']})",
                     "source_upload_job_id": latest_upload_id
                 }
             }

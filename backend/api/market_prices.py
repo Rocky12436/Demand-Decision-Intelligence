@@ -10,7 +10,9 @@ Endpoints:
 
 import logging
 from typing import Any, Dict
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Depends
+from sqlalchemy.orm import Session
+from backend.db.session import get_db
 
 from backend.services.market_price_scraper import fetch_live_commodity_prices
 from backend.services.price_intelligence import generate_market_stock_decisions
@@ -22,13 +24,14 @@ router = APIRouter()
 
 @router.get("/live", summary="Get Live Government PMD Commodity Rates")
 def get_live_market_prices(
-    category: str = Query(None, description="Filter by category: 'Grains & Pulses', 'Edible Oils', 'Vegetables', 'Daily Essentials'")
+    category: str = Query(None, description="Filter by category: 'Grains & Pulses', 'Edible Oils', 'Vegetables', 'Daily Essentials'"),
+    db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """
     Returns real-time daily retail prices across 22 essential commodities
     scraped directly from the Ministry of Consumer Affairs portal (fcainfoweb.nic.in).
     """
-    data = fetch_live_commodity_prices(force_refresh=False)
+    data = fetch_live_commodity_prices(db=db, force_refresh=False)
     if category and category.upper() != "ALL":
         filtered = [c for c in data.get("commodities", []) if c["category"].lower() == category.lower()]
         data = {**data, "commodities": filtered, "total_commodities": len(filtered)}
@@ -36,21 +39,25 @@ def get_live_market_prices(
 
 
 @router.get("/stock-decisions", summary="Get Real-World Price Impact & Stocking Recommendations")
-def get_market_stock_decisions() -> Dict[str, Any]:
+def get_market_stock_decisions(
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
     """
     Evaluates live market commodity inflation/deflation vs catalog baselines
     and outputs quantity holding recommendations (trim vs bulk purchase).
     """
-    return generate_market_stock_decisions(force_refresh=False)
+    return generate_market_stock_decisions(db=db, force_refresh=False)
 
 
 @router.post("/sync", summary="Trigger Instant Live Scrape of Government Portal")
-def trigger_market_prices_sync() -> Dict[str, Any]:
+def trigger_market_prices_sync(
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
     """
     Forces an immediate live HTTP fetch of fcainfoweb.nic.in to sync the latest daily prices.
     """
-    fresh_data = fetch_live_commodity_prices(force_refresh=True)
-    fresh_decisions = generate_market_stock_decisions(force_refresh=True)
+    fresh_data = fetch_live_commodity_prices(db=db, force_refresh=True)
+    fresh_decisions = generate_market_stock_decisions(db=db, force_refresh=True)
     return {
         "status": "success",
         "message": "Successfully synchronized live rates with Ministry of Consumer Affairs portal.",

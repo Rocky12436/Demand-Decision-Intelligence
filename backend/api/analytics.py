@@ -116,6 +116,8 @@ def get_anomalies(
                 "anomaly_score": 0.95 if a.severity == "CRITICAL" else 0.7,
                 "anomaly_type": a.anomaly_type,
                 "severity": a.severity,
+                "detection_method": a.detection_method or "MODIFIED_Z_MAD",
+                "confidence": a.confidence or "MEDIUM",
                 "action_recommendation": a.description or "Investigate deviation",
             }
             for a in db_alerts
@@ -124,6 +126,34 @@ def get_anomalies(
             "dataset_id": target_dataset.id,
             "count": len(formatted_alerts),
             "alerts": formatted_alerts
+        }
+
+    # If product_id specified, run dynamic classifier-aware detection on SKU demand history
+    if product_id:
+        from backend.services.anomaly_service import detect_anomalies_for_series
+        demand_q = db.query(DailyProductDemand).filter(
+            DailyProductDemand.dataset_id == target_dataset.id,
+            DailyProductDemand.product_id == str(product_id).strip()
+        )
+        if city_name:
+            demand_q = demand_q.filter(DailyProductDemand.city_name == city_name.strip())
+        records = demand_q.order_by(DailyProductDemand.date_.asc()).all()
+
+        dates = [r.date_ for r in records]
+        quantities = [float(r.total_quantity or 0.0) for r in records]
+        dyn_res = detect_anomalies_for_series(
+            product_id=str(product_id),
+            city_name=city_name or "ALL",
+            dates=dates,
+            quantities=quantities
+        )
+        return {
+            "dataset_id": target_dataset.id,
+            "sbc_class": dyn_res.get("sbc_class"),
+            "status": dyn_res.get("status"),
+            "confidence": dyn_res.get("confidence"),
+            "count": len(dyn_res.get("anomalies", [])),
+            "alerts": dyn_res.get("anomalies", [])
         }
 
     # Fallback to deliverable CSV if no DB alerts

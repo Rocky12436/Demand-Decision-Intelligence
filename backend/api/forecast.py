@@ -65,6 +65,7 @@ def get_forecast(
     dataset_id: Optional[int] = Query(default=None),
     horizon_days: int = Query(default=14, le=60),
     as_of: Optional[date] = Query(default=None),
+    model_name: str = Query(default="Prophet_MovingAvg_Ensemble"),
     db: Session = Depends(get_db)
 ):
     """
@@ -82,11 +83,15 @@ def get_forecast(
             city_name=city_name,
             horizon_days=horizon_days,
             as_of=as_of,
-            force_recompute=False
+            force_recompute=False,
+            model_name=model_name,
         )
         if result.get("status") == "success":
             result["dataset_name"] = target_dataset.name
             return result
+        elif result.get("status") == "not_found":
+            raise HTTPException(status_code=404, detail=result.get("message", f"Product {product_id} not found in dataset {target_dataset.id}"))
+
 
     # Fallback to general runs store or summary if available
     latest_upload_id = get_latest_upload_job_id(db, target_dataset.id)
