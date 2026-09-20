@@ -2,18 +2,18 @@
 Analytics & Anomaly Detection API Router
 Project: Demand-Decision-Intelligence
 Location: backend/api/analytics.py
-
-Endpoints:
-  GET /api/v1/analytics/eda-summary - Returns high-level EDA metrics
-  GET /api/v1/analytics/anomalies   - Returns active CRITICAL demand anomaly alerts
-  GET /api/v1/analytics/summary     - Returns summary KPI metrics for detected anomalies
 """
 
 import json
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, Query, HTTPException, status
+from fastapi import APIRouter, Query, HTTPException, Depends, status
+from sqlalchemy.orm import Session
 import pandas as pd
+
+from backend.db.session import get_db
+from backend.models.anomaly import AnomalyAlert
+from backend.services.dataset_service import resolve_dataset
 
 router = APIRouter()
 
@@ -61,10 +61,10 @@ def get_eda_summary():
                 "pareto_class_a_skus": 231
             }
         }
-        
+
     with open(eda_json, "r") as f:
         data = json.load(f)
-        
+
     return {
         "status": "success",
         "data": data
@@ -78,41 +78,69 @@ def get_eda_summary():
 )
 def get_anomalies(
     limit: int = Query(50, ge=1, le=500, description="Max alerts to return"),
+    dataset_id: Optional[int] = Query(None, description="Dataset ID to scope"),
     severity: Optional[str] = Query(
         "CRITICAL",
         description="Filter by severity (default: CRITICAL). Pass 'ALL' to view all severities."
     ),
     city_name: Optional[str] = Query(None, description="Filter by city name"),
     product_id: Optional[str] = Query(None, description="Filter by product ID"),
-    anomaly_type: Optional[str] = Query(None, description="Filter by anomaly type: SPIKE_DEMAND, DROP_STOCKOUT")
+    anomaly_type: Optional[str] = Query(None, description="Filter by anomaly type: SPIKE_DEMAND, DROP_STOCKOUT"),
+    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
-    Returns the latest ACTIVE CRITICAL alerts (or filtered by query params).
+    Returns the latest ACTIVE CRITICAL alerts (or filtered by query params) scoped to dataset.
     """
+    target_dataset = resolve_dataset(db, None, dataset_id)
+
+    # Check database records first
+    query = db.query(AnomalyAlert).filter(AnomalyAlert.dataset_id == target_dataset.id)
+    if severity and severity.upper() != "ALL":
+        query = query.filter(AnomalyAlert.severity == severity.upper())
+    if city_name:
+        query = query.filter(AnomalyAlert.city_name == city_name.strip())
+    if product_id:
+        query = query.filter(AnomalyAlert.product_id == str(product_id).strip())
+    if anomaly_type:
+        query = query.filter(AnomalyAlert.anomaly_type == anomaly_type.strip())
+
+    db_alerts = query.order_by(AnomalyAlert.anomaly_date.desc()).limit(limit).all()
+    if db_alerts:
+        formatted_alerts = [
+            {
+                "date_": a.anomaly_date.isoformat(),
+                "product_id": str(a.product_id),
+                "city_name": a.city_name,
+                "actual_demand": round(float(a.actual_value), 2),
+                "expected_demand": round(float(a.expected_value or 0.0), 2),
+                "anomaly_score": 0.95 if a.severity == "CRITICAL" else 0.7,
+                "anomaly_type": a.anomaly_type,
+                "severity": a.severity,
+                "action_recommendation": a.description or "Investigate deviation",
+            }
+            for a in db_alerts
+        ]
+        return {
+            "dataset_id": target_dataset.id,
+            "count": len(formatted_alerts),
+            "alerts": formatted_alerts
+        }
+
+    # Fallback to deliverable CSV if no DB alerts
     df = load_anomalies_dataframe()
 
-    # Filter by severity (default CRITICAL)
     if severity and severity.upper() != "ALL":
         df = df[df["severity"].str.upper() == severity.upper()]
-
-    # Filter by city if supplied
     if city_name:
         df = df[df["city_name"].str.lower() == city_name.strip().lower()]
-
-    # Filter by product_id if supplied
     if product_id:
         df = df[df["product_id"].astype(str) == str(product_id).strip()]
-
-    # Filter by anomaly_type if supplied
     if anomaly_type:
         df = df[df["anomaly_type"].str.upper() == anomaly_type.strip().upper()]
 
-    # Sort latest date first
     df = df.sort_values(by=["date_", "anomaly_score"], ascending=[False, False])
-
     records = df.head(limit).to_dict(orient="records")
 
-    # Format fields to exact types
     formatted_alerts = []
     for r in records:
         formatted_alerts.append({
@@ -128,6 +156,7 @@ def get_anomalies(
         })
 
     return {
+        "dataset_id": target_dataset.id,
         "count": len(formatted_alerts),
         "alerts": formatted_alerts
     }
@@ -138,20 +167,18 @@ def get_anomalies(
     summary="Get Anomaly Analytics Summary KPIs",
     response_description="Returns aggregated metrics and breakdown by severity and anomaly type."
 )
-def get_anomaly_summary() -> Dict[str, Any]:
-    """
-    Returns summary analytics including:
-    - total anomalies detected
-    - breakdown by severity (CRITICAL, MEDIUM, LOW)
-    - breakdown by type (SPIKE_DEMAND, DROP_STOCKOUT, PRICE_ANOMALY)
-    - latest alert date
-    """
+def get_anomaly_summary(
+    dataset_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    target_dataset = resolve_dataset(db, None, dataset_id)
     df = load_anomalies_dataframe()
 
     severity_counts = df["severity"].value_counts().to_dict()
     type_counts = df["anomaly_type"].value_counts().to_dict()
 
     return {
+        "dataset_id": target_dataset.id,
         "total_anomalies": len(df),
         "severity_breakdown": {
             "CRITICAL": int(severity_counts.get("CRITICAL", 0)),

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, String, Integer, Boolean, DateTime
+from sqlalchemy import Column, BigInteger, String, Integer, Boolean, DateTime, ForeignKey
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from backend.db.session import Base
@@ -19,6 +19,8 @@ class Product(Base):
     l1_category_id = Column(Integer, nullable=True)
     l2_category_id = Column(Integer, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    is_provisional = Column(Boolean, default=False, nullable=False)
+    source_upload_job_id = Column(Integer, ForeignKey("upload_jobs.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -28,3 +30,4 @@ class Product(Base):
     inventory_recommendations = relationship("InventoryRecommendation", back_populates="product", cascade="all, delete-orphan")
     forecast_items = relationship("ForecastItem", back_populates="product", cascade="all, delete-orphan")
     anomalies = relationship("AnomalyAlert", back_populates="product", cascade="all, delete-orphan")
+    source_upload_job = relationship("UploadJob", backref="provisional_products")

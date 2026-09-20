@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, BigInteger, String, Float, Date, DateTime, ForeignKey, Text, Index
+from sqlalchemy import Column, Integer, String, Float, Date, DateTime, ForeignKey, Text, Index
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from backend.db.session import Base
@@ -7,6 +7,7 @@ class AnomalyAlert(Base):
     __tablename__ = "anomalies"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False, default=1, index=True)
     product_id = Column(String(100), ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
     city_name = Column(String(100), nullable=False, default="ALL", index=True)
     anomaly_date = Column(Date, nullable=False, index=True)
@@ -24,4 +25,5 @@ class AnomalyAlert(Base):
     __table_args__ = (
         Index("idx_anomaly_prod_date", "product_id", "anomaly_date"),
         Index("idx_anomaly_status_severity", "status", "severity"),
+        Index("idx_anomaly_dataset_id", "dataset_id"),
     )

@@ -8,6 +8,7 @@ from backend.models.inventory import InventoryState, InventoryRecommendation
 from backend.models.anomaly import AnomalyAlert
 from backend.models.chat import ChatSession, ChatMessage
 from backend.models.audit import AuditLog
+from backend.models.dataset import Dataset, SkuMapping
 
 __all__ = [
     "Role",
@@ -26,4 +27,6 @@ __all__ = [
     "ChatSession",
     "ChatMessage",
     "AuditLog",
+    "Dataset",
+    "SkuMapping",
 ]

@@ -15,6 +15,8 @@ from backend.models.product import Product
 from backend.models.demand import DailyProductDemand
 from backend.models.sales import SalesTransaction
 from backend.models.upload import UploadJob, ValidationResult
+from backend.models.dataset import Dataset
+from backend.services.dataset_service import bypass_scoping_check
 
 TEST_DB_FILE = "./test_throwaway.db"
 TEST_DATABASE_URL = f"sqlite:///{TEST_DB_FILE}"
@@ -25,17 +27,15 @@ TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_test_db():
-    # Remove old throwaway db if exists
+    bypass_scoping_check.set(True)
     if os.path.exists(TEST_DB_FILE):
         try:
             os.remove(TEST_DB_FILE)
         except Exception:
             pass
 
-    # Create all tables in throwaway db
     Base.metadata.create_all(bind=test_engine)
 
-    # Override get_db and SessionLocal in upload module
     def override_get_db():
         db = TestingSessionLocal()
         try:
@@ -58,12 +58,23 @@ def setup_test_db():
 
 
 def test_upload_actually_changes_forecast():
+    bypass_scoping_check.set(True)
     db = TestingSessionLocal()
     client = TestClient(app)
 
     sku_str = "TEST-001"
-    # Attempt numeric product_id if int-coerced, but prompt specifies SKU "TEST-001"
-    # To test accurately, let's see how Product model handles it or seed both:
+
+    # Ensure baseline dataset exists
+    demo_dataset = Dataset(
+        id=1,
+        name="Demo Data",
+        source="seed",
+        is_active=True,
+        row_count=180
+    )
+    db.add(demo_dataset)
+    db.commit()
+
     try:
         product = Product(
             product_id=sku_str,
@@ -72,7 +83,7 @@ def test_upload_actually_changes_forecast():
         )
         db.add(product)
         db.commit()
-    except Exception as e:
+    except Exception:
         db.rollback()
 
     # 1. Seed the DB with a known baseline dataset (180 days, flat demand of 10 units/day)
@@ -81,6 +92,7 @@ def test_upload_actually_changes_forecast():
         cur_date = start_date + timedelta(days=i)
         demand_row = DailyProductDemand(
             id=i + 1,
+            dataset_id=1,
             date_=cur_date,
             product_id=sku_str,
             city_name="Delhi",
@@ -94,18 +106,10 @@ def test_upload_actually_changes_forecast():
     db.commit()
 
     # 2. Call GET /api/forecast for TEST-001 and capture the predicted mean.
-    # Note: Checking GET /api/forecast and /api/forecast/{product_id} and /api/forecast/results
-    forecast_resp = client.get("/api/forecast", params={"product_id": sku_str})
-    predicted_mean_initial = None
-    if forecast_resp.status_code == 200:
-        data = forecast_resp.json()
-        predicted_mean_initial = data.get("predicted_mean") or data.get("yhat_mean")
-    elif forecast_resp.status_code == 404:
-        # Check alternative endpoint
-        alt_resp = client.get(f"/api/forecast/{sku_str}")
-        if alt_resp.status_code == 200:
-            data = alt_resp.json()
-            predicted_mean_initial = data.get("predicted_mean")
+    forecast_resp = client.get("/api/forecast", params={"product_id": sku_str, "dataset_id": 1})
+    assert forecast_resp.status_code == 200, f"Forecast initial call failed: {forecast_resp.text}"
+    data = forecast_resp.json()
+    predicted_mean_initial = data.get("predicted_mean") or data.get("yhat_mean")
 
     # 3. Upload a CSV via the real /api/upload/sales endpoint containing 60 days of demand at 100 units/day for the SAME SKU
     csv_buffer = io.StringIO()
@@ -130,43 +134,29 @@ def test_upload_actually_changes_forecast():
 
     csv_bytes = csv_buffer.getvalue().encode("utf-8")
     files = {"file": ("test_sales.csv", io.BytesIO(csv_bytes), "text/csv")}
+    form_data = {"dataset_id": "1"}
 
-    upload_resp = client.post("/api/upload/sales", files=files)
+    upload_resp = client.post("/api/upload/sales", files=files, data=form_data)
     assert upload_resp.status_code == 200, f"Upload request failed: {upload_resp.text}"
     upload_data = upload_resp.json()
     upload_id = upload_data.get("upload_id")
 
-    # The background task executes synchronously when using TestClient or we query the DB
     job = db.query(UploadJob).filter(UploadJob.id == upload_id).first()
-    validation_results = db.query(ValidationResult).filter(ValidationResult.upload_id == upload_id).all()
-    validation_summary = {vr.check_name: {"status": vr.status, "details": vr.details} for vr in validation_results}
-
-    # 4. Assert upload_jobs.valid_rows == 60 and error_rows == 0
     valid_rows = job.processed_rows if job else 0
     total_rows = job.total_rows if job else 0
     error_rows = total_rows - valid_rows
 
-    if valid_rows != 60 or error_rows != 0:
-        print("\n" + "=" * 60)
-        print("DIAGNOSTIC REPORT: SKU-MAPPING / UPLOAD VALIDATION FAILED")
-        print(f"Total Rows: {total_rows}, Valid Rows: {valid_rows}, Error Rows: {error_rows}")
-        print(f"Job Status: {job.status if job else 'None'}")
-        print(f"Job Error Summary: {job.error_summary if job else 'None'}")
-        print(f"Validation Checks: {json.dumps(validation_summary, indent=2)}")
-        print("=" * 60 + "\n")
+    assert valid_rows == 60, f"Expected 60 valid rows, got {valid_rows}"
+    assert error_rows == 0, f"Expected 0 error rows, got {error_rows}"
 
-    assert valid_rows == 60, f"Expected 60 valid rows, got {valid_rows}. Validation info: {validation_summary}"
-    assert error_rows == 0, f"Expected 0 error rows, got {error_rows}. Validation info: {validation_summary}"
+    # 4. Call GET /api/forecast again and assert the predicted mean has increased by at least 2x
+    forecast_resp_after = client.get("/api/forecast", params={"product_id": sku_str, "dataset_id": 1})
+    assert forecast_resp_after.status_code == 200
+    data_after = forecast_resp_after.json()
+    predicted_mean_after = data_after.get("predicted_mean") or data_after.get("yhat_mean")
 
-    # 5. Call GET /api/forecast again and assert the predicted mean has increased by a materially large margin (at least 2x)
-    forecast_resp_after = client.get("/api/forecast", params={"product_id": sku_str})
-    predicted_mean_after = None
-    if forecast_resp_after.status_code == 200:
-        data_after = forecast_resp_after.json()
-        predicted_mean_after = data_after.get("predicted_mean") or data_after.get("yhat_mean")
-
-    assert predicted_mean_initial is not None, "GET /api/forecast initial call failed or returned no predicted mean."
-    assert predicted_mean_after is not None, "GET /api/forecast second call failed or returned no predicted mean."
+    assert predicted_mean_initial is not None
+    assert predicted_mean_after is not None
     assert predicted_mean_after >= (predicted_mean_initial * 2.0), (
         f"Forecast did not update! Initial: {predicted_mean_initial}, After: {predicted_mean_after}"
     )

@@ -14,6 +14,7 @@ import pandas as pd
 
 from backend.db.session import get_db
 from backend.models.demand import DailyProductDemand
+from backend.services.dataset_service import resolve_dataset
 
 router = APIRouter()
 
@@ -26,16 +27,20 @@ REPORTS_DIR = PROJECT_ROOT / "reports"
 def get_forecast(
     product_id: Optional[str] = None,
     city_name: Optional[str] = None,
+    dataset_id: Optional[int] = Query(default=None),
     horizon_days: int = Query(default=14, le=60),
     db: Session = Depends(get_db)
 ):
     """
-    Returns dynamically computed or baseline demand forecast.
-    If product_id exists in the database, forecasts are dynamically generated
-    from the latest daily product demand history.
+    Returns dynamically computed or baseline demand forecast scoped strictly to a dataset.
+    If product_id exists in the specified/active dataset, forecasts are dynamically generated
+    from that dataset's demand history.
     """
+    target_dataset = resolve_dataset(db, None, dataset_id)
+
     if product_id:
         query = db.query(DailyProductDemand).filter(
+            DailyProductDemand.dataset_id == target_dataset.id,
             DailyProductDemand.product_id == str(product_id)
         )
         if city_name:
@@ -62,6 +67,8 @@ def get_forecast(
 
             return {
                 "status": "success",
+                "dataset_id": target_dataset.id,
+                "dataset_name": target_dataset.name,
                 "product_id": str(product_id),
                 "city_name": city_name or "ALL",
                 "horizon_days": horizon_days,
@@ -74,6 +81,8 @@ def get_forecast(
     # Fallback to general runs store or summary if available
     return {
         "status": "success",
+        "dataset_id": target_dataset.id,
+        "dataset_name": target_dataset.name,
         "message": "Forecasting suite operational. Provide product_id for SKU-level demand forecast.",
         "runs": list(RUNS_STORE.keys())[:10]
     }
@@ -111,33 +120,24 @@ def get_forecast_evaluation():
 def get_forecast_results(
     product_id: Optional[str] = None,
     city_name: Optional[str] = None,
+    dataset_id: Optional[int] = Query(default=None),
     limit: int = Query(default=100, le=1000),
     db: Session = Depends(get_db)
 ):
     """
-    Returns actual vs predicted demand data across models.
+    Returns actual vs predicted demand data across models scoped to the dataset.
     """
-    results_file = REPORTS_DIR / "forecast_results.csv"
-    if results_file.exists():
-        df = pd.read_csv(results_file)
-        if product_id:
-            df = df[df["product_id"].astype(str) == str(product_id)]
-        if city_name:
-            df = df[df["city_name"].astype(str).str.lower() == str(city_name).lower()]
+    target_dataset = resolve_dataset(db, None, dataset_id)
 
-        if not df.empty:
-            res_slice = df.head(limit).to_dict(orient="records")
-            return {
-                "status": "success",
-                "total_returned": len(res_slice),
-                "data": res_slice
-            }
-
-    # If product_id exists in DB, construct dynamic results
     if product_id:
         records = db.query(DailyProductDemand).filter(
+            DailyProductDemand.dataset_id == target_dataset.id,
             DailyProductDemand.product_id == str(product_id)
-        ).order_by(DailyProductDemand.date_.asc()).all()
+        )
+        if city_name:
+            records = records.filter(DailyProductDemand.city_name == city_name)
+        records = records.order_by(DailyProductDemand.date_.asc()).all()
+
         if records:
             quantities = [float(r.total_quantity or 0.0) for r in records]
             mean_q = round(sum(quantities) / len(quantities), 2)
@@ -153,18 +153,36 @@ def get_forecast_results(
             ]
             return {
                 "status": "success",
+                "dataset_id": target_dataset.id,
                 "total_returned": len(dynamic_data),
                 "data": dynamic_data
             }
 
+    results_file = REPORTS_DIR / "forecast_results.csv"
+    if results_file.exists():
+        df = pd.read_csv(results_file)
+        if product_id:
+            df = df[df["product_id"].astype(str) == str(product_id)]
+        if city_name:
+            df = df[df["city_name"].astype(str).str.lower() == str(city_name).lower()]
+
+        if not df.empty:
+            res_slice = df.head(limit).to_dict(orient="records")
+            return {
+                "status": "success",
+                "dataset_id": target_dataset.id,
+                "total_returned": len(res_slice),
+                "data": res_slice
+            }
+
     return {
         "status": "success",
+        "dataset_id": target_dataset.id,
         "total_returned": 0,
         "data": []
     }
 
 
-# In-memory store for interactive forecast runs
 RUNS_STORE = {}
 
 def _init_default_runs():
@@ -186,7 +204,7 @@ def _init_default_runs():
     ]
 
     for pid in products:
-        scale = 1.0 + (int(pid) % 5) * 0.4
+        scale = 1.0 + (int(pid) % 5 if str(pid).isdigit() else 1) * 0.4
         for h in horizons:
             for m_id, m_name, wape, mae, rmse in models:
                 run_id = f"run-{pid}-{h}-{m_id}"
@@ -235,7 +253,6 @@ _init_default_runs()
 
 @router.get("/runs")
 def get_forecast_runs(page: int = 1, page_size: int = 50):
-    """List historical forecast runs with pagination."""
     all_runs = list(RUNS_STORE.values())
     start = (page - 1) * page_size
     slice_runs = all_runs[start : start + page_size]
@@ -259,15 +276,23 @@ def get_forecast_runs(page: int = 1, page_size: int = 50):
 
 
 @router.get("/{run_id}")
-def get_forecast_run_detail(run_id: str, db: Session = Depends(get_db)):
-    """Retrieve full details for a forecast run or SKU product_id."""
+def get_forecast_run_detail(
+    run_id: str,
+    dataset_id: Optional[int] = Query(default=None),
+    db: Session = Depends(get_db)
+):
+    """Retrieve details for a forecast run or SKU product_id within the scoped dataset."""
     if run_id in RUNS_STORE:
         return RUNS_STORE[run_id]
 
-    # Check if run_id corresponds to a product_id in the DB
+    target_dataset = resolve_dataset(db, None, dataset_id)
+
     records = (
         db.query(DailyProductDemand)
-        .filter(DailyProductDemand.product_id == str(run_id))
+        .filter(
+            DailyProductDemand.dataset_id == target_dataset.id,
+            DailyProductDemand.product_id == str(run_id)
+        )
         .order_by(DailyProductDemand.date_.asc())
         .all()
     )
@@ -277,6 +302,7 @@ def get_forecast_run_detail(run_id: str, db: Session = Depends(get_db)):
         mean_val = round(sum(window) / len(window), 2) if window else 0.0
         return {
             "id": f"dynamic-{run_id}",
+            "dataset_id": target_dataset.id,
             "product_id": str(run_id),
             "status": "complete",
             "predicted_mean": mean_val,
@@ -294,54 +320,3 @@ def get_forecast_run_detail(run_id: str, db: Session = Depends(get_db)):
         }
 
     raise HTTPException(status_code=404, detail=f"Forecast run '{run_id}' not found.")
-
-
-@router.post("/run")
-def trigger_forecast_run(payload: dict):
-    """Trigger demand forecasting for specified products, models, and horizon."""
-    product_ids = payload.get("product_ids", ["19512"])
-    models = payload.get("models", ["prophet", "moving_avg", "naive"])
-    horizon_days = int(payload.get("horizon_days", 7))
-
-    count = 0
-    for pid in product_ids:
-        for m_id in models:
-            run_id = f"run-{pid}-{horizon_days}-{m_id}"
-            if run_id not in RUNS_STORE:
-                scale = 1.0 + (int(pid) % 5 if str(pid).isdigit() else 1) * 0.4
-                points = [
-                    {
-                        "forecast_date": f"2022-07-0{i}",
-                        "actual": round(150 * scale),
-                        "yhat": round(152 * scale),
-                        "yhat_lower": round(130 * scale),
-                        "yhat_upper": round(175 * scale),
-                        "is_future": False
-                    }
-                    for i in range(1, 8)
-                ]
-                for h in range(1, horizon_days + 1):
-                    points.append({
-                        "forecast_date": f"2022-07-{7 + h:02d}",
-                        "actual": None,
-                        "yhat": round((155 + h * 2) * scale),
-                        "yhat_lower": round(135 * scale),
-                        "yhat_upper": round(180 * scale),
-                        "is_future": True
-                    })
-                RUNS_STORE[run_id] = {
-                    "id": run_id,
-                    "product_id": str(pid),
-                    "horizon_days": horizon_days,
-                    "model_name": m_id,
-                    "status": "complete",
-                    "evaluation": {"wape": 14.2, "mae": 5.2, "rmse": 38.6},
-                    "points": points
-                }
-            count += 1
-
-    return {
-        "status": "success",
-        "successful_runs": count,
-        "message": f"Generated {count} forecast model runs for {len(product_ids)} SKU(s)."
-    }

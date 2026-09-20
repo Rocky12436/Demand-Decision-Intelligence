@@ -13,6 +13,7 @@ import pandas as pd
 
 from backend.db.session import get_db
 from backend.models.demand import DailyProductDemand
+from backend.services.dataset_service import resolve_dataset
 
 router = APIRouter()
 
@@ -24,17 +25,21 @@ REPORTS_DIR = PROJECT_ROOT / "reports"
 def get_inventory_recommendations(
     product_id: Optional[str] = None,
     city_name: Optional[str] = None,
+    dataset_id: Optional[int] = Query(default=None),
     limit: int = Query(default=100, le=1000),
     db: Session = Depends(get_db)
 ):
     """
     Returns calculated inventory optimization recommendations:
     Safety Stock, Reorder Point (ROP), Target Stock Level (TSL), and Unit Landing Cost.
-    Dynamically computes recommendations from the database if product_id is provided,
+    Dynamically computes recommendations from the database scoped to the dataset if product_id is provided,
     otherwise returns precomputed deliverable sample dataset.
     """
+    target_dataset = resolve_dataset(db, None, dataset_id)
+
     if product_id:
         query = db.query(DailyProductDemand).filter(
+            DailyProductDemand.dataset_id == target_dataset.id,
             DailyProductDemand.product_id == str(product_id)
         )
         if city_name:
@@ -53,11 +58,12 @@ def get_inventory_recommendations(
             reorder_point = round((avg_demand * lead_time_days) + safety_stock, 2)
             target_stock = round(reorder_point + (avg_demand * 7.0), 2)
 
-            # Average landing price or unit price
             avg_price = records[-1].avg_unit_price if records[-1].avg_unit_price else 10.0
             unit_landing_cost = round(avg_price * 0.8, 2)
 
             rec = {
+                "dataset_id": target_dataset.id,
+                "dataset_name": target_dataset.name,
                 "product_id": str(product_id),
                 "city_name": city_name or (records[0].city_name if records else "Delhi"),
                 "mean_daily_demand": round(avg_demand, 2),
@@ -73,6 +79,7 @@ def get_inventory_recommendations(
             }
             return {
                 "status": "success",
+                "dataset_id": target_dataset.id,
                 "total_returned": 1,
                 "data": [rec]
             }
@@ -91,6 +98,7 @@ def get_inventory_recommendations(
     res_slice = df.head(limit).to_dict(orient="records")
     return {
         "status": "success",
+        "dataset_id": target_dataset.id,
         "total_returned": len(res_slice),
         "data": res_slice
     }

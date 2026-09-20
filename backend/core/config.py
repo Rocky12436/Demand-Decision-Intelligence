@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+psycopg2://postgres:yash@localhost:5432/demand_decision_db"
 
+    # SKU & Upload Pipeline Settings
+    AUTO_CREATE_UNKNOWN_SKUS: bool = True
+
     class Config:
         case_sensitive = True
         env_file = str(ENV_FILE)

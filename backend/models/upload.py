@@ -20,7 +20,7 @@ class UploadJob(Base):
 
     user = relationship("User", back_populates="upload_jobs")
     validation_results = relationship("ValidationResult", back_populates="upload_job", cascade="all, delete-orphan")
-    sales_transactions = relationship("SalesTransaction", back_populates="upload_job")
+    sales_transactions = relationship("SalesTransaction", back_populates="upload_job", foreign_keys="[SalesTransaction.upload_job_id]")
 
 class ValidationResult(Base):
     __tablename__ = "validation_results"
