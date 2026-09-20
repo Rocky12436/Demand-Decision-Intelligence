@@ -12,6 +12,7 @@ import ForecastPage from './pages/forecast/ForecastPage';
 import InventoryPage from './pages/inventory/InventoryPage';
 import TrendsPage from './pages/trends/TrendsPage';
 import PriceInsightsPage from './pages/pricing/PriceInsightsPage';
+import MarketPricesPage from './pages/pricing/MarketPricesPage';
 import GenericPage from './pages/common/GenericPage';
 import './styles/main.css';
 
@@ -33,7 +34,9 @@ export default function App() {
             <Route path="/inventory" element={<InventoryPage />} />
             <Route path="/trends" element={<TrendsPage />} />
             <Route path="/price-insights" element={<PriceInsightsPage />} />
+            <Route path="/market-prices" element={<MarketPricesPage />} />
             <Route path="/evaluation" element={<ForecastPage />} />
+
             <Route 
               path="/assistant" 
               element={<GenericPage title="AI Decision Assistant" description="RAG-grounded natural language Q&A across sales, inventory, and forecasts." />} 

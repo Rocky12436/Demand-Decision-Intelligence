@@ -99,4 +99,34 @@ export async function getValidationResults(uploadId) {
   return data;
 }
 
+export async function getPricingElasticity(limit = 100, classification = "", category = "") {
+  let url = `${API_BASE_URL}/pricing/elasticity?limit=${limit}`;
+  if (classification) url += `&classification=${encodeURIComponent(classification)}`;
+  if (category) url += `&category=${encodeURIComponent(category)}`;
+
+  const response = await fetch(url);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "Failed to fetch pricing elasticity");
+  return data;
+}
+
+export async function getPricingRecommendations(category = "", limit = 100) {
+  let url = `${API_BASE_URL}/pricing/recommendations?limit=${limit}`;
+  if (category) url += `&category=${encodeURIComponent(category)}`;
+
+  const response = await fetch(url);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "Failed to fetch pricing recommendations");
+  return data;
+}
+
+export async function recalculateElasticity() {
+  const response = await fetch(`${API_BASE_URL}/pricing/recalculate`, {
+    method: "POST"
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "Failed to recalculate elasticity");
+  return data;
+}
+
 export default api;

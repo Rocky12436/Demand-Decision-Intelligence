@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from backend.core.config import settings
-from backend.api import health, auth, demand, products, upload, forecast, inventory, analytics, market_prices
+from backend.api import health, auth, demand, products, upload, forecast, inventory, analytics, market_prices, pricing
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -69,10 +69,17 @@ app.include_router(
 )
 
 app.include_router(
+    pricing.router,
+    prefix=f"{settings.API_V1_STR}/pricing",
+    tags=["Price Elasticity & Optimization"]
+)
+
+app.include_router(
     market_prices.router,
     prefix=f"{settings.API_V1_STR}/market-prices",
     tags=["Government Market Prices & Stocking Intelligence"]
 )
+
 
 @app.get("/")
 def root():
