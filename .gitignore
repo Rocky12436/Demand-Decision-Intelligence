@@ -6,6 +6,18 @@
 Demand-Decision-Intelligence-main/dataset/
 dataset/
 
+# Combined sales file
+dataset/combined/fact_sales_combined.csv
+
+# Cleaned / processed datasets
+dataset/cleaned/*.csv
+dataset/processed/
+dataset/*.parquet
+dataset/failed_rows/
+dataset/*.lock
+*.lock
+uploads/
+
 # Validation reports & sample CSVs at root
 Demand-Decision-Intelligence-main/dataset_validation_report_v3.csv
 Demand-Decision-Intelligence-main/product_id_validation_v3.csv
@@ -33,6 +45,7 @@ build/
 .venv/
 venv/
 env/
+*.db
 
 # ===========================
 # Frontend & Node

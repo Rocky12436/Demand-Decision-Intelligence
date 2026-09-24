@@ -3,7 +3,6 @@ import {
   Boxes,
   AlertTriangle,
   CheckCircle2,
-  ShieldCheck,
   RefreshCw,
   Search,
   Sliders,
@@ -13,9 +12,23 @@ import {
   ArrowUpDown,
   History,
   Activity,
-  Calendar
+  Calendar,
+  Loader2,
+  Eye,
+  ShoppingCart,
+  X,
 } from 'lucide-react';
-import api from '../../services/api';
+import api, { recomputeForecast } from '../../services/api';
+import ForwardBuyWidget from './ForwardBuyWidget';
+import SkuExplainabilityModal from '../../components/common/SkuExplainabilityModal';
+import {
+  PageShell,
+  PageHeader,
+  Card,
+  StatCard,
+  StatusBadge,
+  EmptyState,
+} from '../../components/ui';
 
 const Z_SCORES = {
   0.90: 1.282,
@@ -28,6 +41,8 @@ export default function InventoryPage() {
   const [activeTab, setActiveTab] = useState('recommendations'); // 'recommendations' | 'simulation'
   const [data, setData] = useState([]);
   const [simulationData, setSimulationData] = useState([]);
+  const [freshness, setFreshness] = useState(null);
+  const [recomputing, setRecomputing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [searchSKU, setSearchSKU] = useState('');
   const [selectedCity, setSelectedCity] = useState('ALL');
@@ -35,6 +50,8 @@ export default function InventoryPage() {
   const [serviceLevel, setServiceLevel] = useState(0.95);
   const [sortField, setSortField] = useState('mean_daily_demand');
   const [sortAsc, setSortAsc] = useState(false);
+  const [selectedForwardBuySku, setSelectedForwardBuySku] = useState(null);
+  const [selectedExplainSku, setSelectedExplainSku] = useState(null);
 
   useEffect(() => {
     loadInventoryData();
@@ -51,6 +68,9 @@ export default function InventoryPage() {
       const res = await api.get(url);
       if (res?.data?.data) {
         setData(res.data.data);
+      }
+      if (res?.data?.freshness) {
+        setFreshness(res.data.freshness);
       }
     } catch (err) {
       console.error('Failed to load inventory recommendations', err);
@@ -82,6 +102,19 @@ export default function InventoryPage() {
     }
   };
 
+  const handleRecomputeNow = async () => {
+    setRecomputing(true);
+    try {
+      await recomputeForecast();
+      await loadInventoryData();
+      await loadSimulationData();
+    } catch (err) {
+      console.error('Recompute failed', err);
+    } finally {
+      setRecomputing(false);
+    }
+  };
+
   // Dynamic calculations based on user sliders for policy recommendations
   const processedData = useMemo(() => {
     const z = Z_SCORES[serviceLevel] || 1.645;
@@ -90,36 +123,44 @@ export default function InventoryPage() {
     return data.map((item) => {
       const mean = Number(item.mean_daily_demand || item.avg_daily_demand) || 0;
       const std = Number(item.std_daily_demand) || Math.round(mean * 0.12);
+      const sigmaL = item.sigma_lead_time_days != null ? Number(item.sigma_lead_time_days) : (0.25 * lt);
+      const ltConfidence = item.lead_time_confidence || (item.lead_time_observations_count >= 5 ? 'HIGH' : 'LOW');
 
-      const ss = Math.ceil(z * std * Math.sqrt(lt));
-      const rop = Math.ceil(mean * lt + ss);
-      const tsl = Math.ceil(mean * (lt + 7) + ss);
+      // Dynamic inventory formula (King's formula with lead time variability)
+      const varianceDemandTerm = lt * Math.pow(std, 2);
+      const varianceLeadTimeTerm = Math.pow(mean, 2) * Math.pow(sigmaL, 2);
+      const ssKings = Math.ceil(z * Math.sqrt(varianceDemandTerm + varianceLeadTimeTerm));
+      const ssClassical = Math.ceil(z * std * Math.sqrt(lt));
+      const ssDelta = ssKings - ssClassical;
+
+      const rop = Math.ceil(mean * lt + ssKings);
+      const tsl = Math.ceil(mean * (lt + 7) + ssKings);
 
       let status = 'HEALTHY';
-      let statusColor = 'var(--accent-emerald)';
-      let badgeBg = 'rgba(16, 185, 129, 0.15)';
-      let actionText = 'Stock Buffer Adequate';
+      let statusVariant = 'success';
+      let actionText = 'Stock level OK';
 
       if (mean > 5000 && std / (mean || 1) > 0.12) {
         status = 'REORDER_NOW';
-        statusColor = 'var(--accent-rose)';
-        badgeBg = 'rgba(244, 63, 94, 0.15)';
-        actionText = 'Trigger Fast Replenishment PO';
+        statusVariant = 'critical';
+        actionText = 'Order now — risk of running out';
       } else if (mean > 3000) {
         status = 'BUFFER_REVIEW';
-        statusColor = 'var(--accent-amber)';
-        badgeBg = 'rgba(245, 158, 11, 0.15)';
-        actionText = 'Review Supplier Lead Times';
+        statusVariant = 'warning';
+        actionText = 'Check supplier delivery times';
       }
 
       return {
         ...item,
-        calculated_ss: ss,
+        calculated_ss: ssKings,
+        ss_classical: ssClassical,
+        ss_delta: ssDelta,
+        sigma_lead_time: sigmaL,
+        lead_time_confidence: ltConfidence,
         calculated_rop: rop,
         calculated_tsl: tsl,
         status,
-        statusColor,
-        badgeBg,
+        statusVariant,
         actionText,
       };
     });
@@ -166,454 +207,445 @@ export default function InventoryPage() {
     }
   };
 
+  const SortHeader = ({ field, label, align = 'left' }) => (
+    <th
+      onClick={() => toggleSort(field)}
+      style={{
+        ...thStyle,
+        textAlign: align,
+        cursor: 'pointer',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', justifyContent: align === 'right' ? 'flex-end' : 'flex-start' }}>
+        {label}
+        <ArrowUpDown size={11} style={{ opacity: sortField === field ? 1 : 0.3 }} />
+      </div>
+    </th>
+  );
+
   return (
-    <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
-        <div>
-          <h1 style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-            <Boxes color="var(--accent-primary)" size={28} />
-            Stock & Reorder Decision Planner
-          </h1>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.925rem', marginTop: '0.25rem' }}>
-            Know exactly how much inventory to buy from suppliers and when to place the order so you never run out of stock.
-          </p>
-        </div>
-
-        <button
-          className="btn btn-primary"
-          onClick={() => {
-            loadInventoryData();
-            loadSimulationData();
-          }}
-          disabled={loading}
-          style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 1.4rem' }}
-        >
-          <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
-          {loading ? 'Recalculating...' : 'Refresh Stock Status'}
-        </button>
-      </div>
-
-      {/* KPI Cards */}
-      <div className="grid-kpi" style={{ marginBottom: '1.5rem' }}>
-        <div className="kpi-card">
-          <div className="kpi-title">Monitored Store Products</div>
-          <div className="kpi-value">{totalSKUs.toLocaleString()}</div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Active catalog items</div>
-        </div>
-
-        <div className="kpi-card">
-          <div className="kpi-title">Items Needing Urgent Reorder</div>
-          <div className="kpi-value" style={{ color: 'var(--accent-rose)' }}>{reorderUrgentCount}</div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Stock running dangerously low</div>
-        </div>
-
-        <div className="kpi-card">
-          <div className="kpi-title">Avg. Emergency Backup Buffer</div>
-          <div className="kpi-value" style={{ color: 'var(--accent-cyan)' }}>{avgSafetyStock.toLocaleString()} <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>units</span></div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Guarantees {Math.round(serviceLevel * 100)}% of customer orders fulfilled</div>
-        </div>
-
-        <div className="kpi-card">
-          <div className="kpi-title">Supplier Delivery Time</div>
-          <div className="kpi-value" style={{ color: 'var(--accent-amber)' }}>{leadTimeDays} Days</div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Days for new stock to arrive</div>
-        </div>
-      </div>
-
-      {/* View Switcher Tabs */}
-      <div style={{ display: 'flex', gap: '0.75rem', borderBottom: '1px solid var(--border-subtle)', marginBottom: '1.5rem' }}>
-        <button
-          onClick={() => setActiveTab('recommendations')}
-          style={{
-            padding: '0.65rem 1.25rem',
-            background: 'none',
-            border: 'none',
-            borderBottom: activeTab === 'recommendations' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-            color: activeTab === 'recommendations' ? 'var(--accent-primary)' : 'var(--text-secondary)',
-            fontWeight: activeTab === 'recommendations' ? 700 : 500,
-            fontSize: '0.9rem',
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.5rem'
-          }}
-        >
-          <Sliders size={16} />
-          Policy Recommendations & Optimization
-        </button>
-        <button
-          onClick={() => setActiveTab('simulation')}
-          style={{
-            padding: '0.65rem 1.25rem',
-            background: 'none',
-            border: 'none',
-            borderBottom: activeTab === 'simulation' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-            color: activeTab === 'simulation' ? 'var(--accent-primary)' : 'var(--text-secondary)',
-            fontWeight: activeTab === 'simulation' ? 700 : 500,
-            fontSize: '0.9rem',
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.5rem'
-          }}
-        >
-          <History size={16} />
-          Daily Stock Movements & Simulation ({filteredSimulation.length})
-        </button>
-      </div>
-
-      {/* Global Filter Bar */}
-      <div className="card" style={{ marginBottom: '1.5rem', padding: '1.25rem' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.25rem', alignItems: 'flex-end' }}>
-          {/* SKU Search */}
-          <div>
-            <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.4rem', fontWeight: 600, textTransform: 'uppercase' }}>
-              Search SKU ID
-            </label>
-            <div style={{ position: 'relative' }}>
-              <Search size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '10px', top: '10px' }} />
-              <input
-                type="text"
-                placeholder="e.g. 19512"
-                value={searchSKU}
-                onChange={(e) => setSearchSKU(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem 0.5rem 0.5rem 2.2rem',
-                  borderRadius: '6px',
-                  border: '1px solid var(--border-strong)',
-                  backgroundColor: 'var(--bg-surface-elevated)',
-                  color: '#fff',
-                  fontSize: '0.85rem',
-                }}
-              />
+    <PageShell maxWidth="1400px">
+      <PageHeader
+        icon={Boxes}
+        title="Stock & Reorder Planning"
+        subtitle="Know exactly how much inventory to buy from suppliers and when to place the order so you never run out of stock."
+        actions={
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <div style={{ display: 'flex', backgroundColor: 'var(--bg-surface-subtle)', borderRadius: 'var(--border-radius-md)', padding: '2px', border: '1px solid var(--border-subtle)' }}>
+              <button
+                onClick={() => setActiveTab('recommendations')}
+                className={activeTab === 'recommendations' ? 'diq-btn diq-btn-primary diq-btn-sm' : 'diq-btn diq-btn-secondary diq-btn-sm'}
+                style={{ borderRadius: '4px', border: 'none' }}
+              >
+                Stock Policy
+              </button>
+              <button
+                onClick={() => setActiveTab('simulation')}
+                className={activeTab === 'simulation' ? 'diq-btn diq-btn-primary diq-btn-sm' : 'diq-btn diq-btn-secondary diq-btn-sm'}
+                style={{ borderRadius: '4px', border: 'none' }}
+              >
+                Movement Simulation
+              </button>
             </div>
-          </div>
-
-          {/* City Filter */}
-          <div>
-            <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.4rem', fontWeight: 600, textTransform: 'uppercase' }}>
-              Fulfillment Hub
-            </label>
-            <select
-              value={selectedCity}
-              onChange={(e) => setSelectedCity(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '0.5rem 0.75rem',
-                borderRadius: '6px',
-                border: '1px solid var(--border-strong)',
-                backgroundColor: 'var(--bg-surface-elevated)',
-                color: '#fff',
-                fontSize: '0.85rem',
+            <button
+              onClick={() => {
+                loadInventoryData();
+                loadSimulationData();
               }}
+              className="diq-btn diq-btn-secondary"
+              disabled={loading}
             >
-              <option value="ALL">All Hubs (Bengaluru, Delhi, Mumbai, HR-NCR)</option>
-              <option value="Delhi">Delhi Hub</option>
-              <option value="Bengaluru">Bengaluru Hub</option>
-              <option value="Mumbai">Mumbai Hub</option>
-              <option value="HR-NCR">HR-NCR Hub</option>
-            </select>
+              <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+              {loading ? 'Loading...' : 'Refresh'}
+            </button>
           </div>
+        }
+      />
 
-          {/* Lead Time Slider (Tab 1) */}
-          {activeTab === 'recommendations' && (
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
-                <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 600, textTransform: 'uppercase' }}>
-                  Supplier Lead Time
-                </label>
-                <span style={{ fontSize: '0.85rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>
-                  {leadTimeDays} Days
-                </span>
-              </div>
-              <input
-                type="range"
-                min="1"
-                max="14"
-                step="1"
-                value={leadTimeDays}
-                onChange={(e) => setLeadTimeDays(Number(e.target.value))}
-                style={{ width: '100%', accentColor: 'var(--accent-primary)', cursor: 'pointer' }}
-              />
-            </div>
-          )}
-
-          {/* Service Level (Tab 1) */}
-          {activeTab === 'recommendations' && (
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.4rem', fontWeight: 600, textTransform: 'uppercase' }}>
-                Customer Fulfillment Target
-              </label>
-              <div style={{ display: 'flex', gap: '0.4rem' }}>
-                {[0.90, 0.95, 0.98, 0.99].map((lvl) => (
-                  <button
-                    key={lvl}
-                    onClick={() => setServiceLevel(lvl)}
-                    style={{
-                      flex: 1,
-                      padding: '0.45rem 0',
-                      borderRadius: '6px',
-                      border: serviceLevel === lvl ? '1px solid var(--accent-primary)' : '1px solid var(--border-strong)',
-                      backgroundColor: serviceLevel === lvl ? 'rgba(59, 130, 246, 0.2)' : 'var(--bg-surface-elevated)',
-                      color: serviceLevel === lvl ? '#93c5fd' : 'var(--text-secondary)',
-                      fontWeight: serviceLevel === lvl ? 600 : 500,
-                      fontSize: '0.8rem',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {Math.round(lvl * 100)}%
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        {/* ── KPI Cards ── */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '12px' }}>
+          <StatCard label="Products Tracked" value={totalSKUs.toLocaleString('en-IN')} subtext="In selected city" />
+          <StatCard
+            label="Need Urgent Reorder"
+            value={reorderUrgentCount}
+            subtext="High risk of stockout"
+            style={reorderUrgentCount > 0 ? { borderColor: 'var(--status-critical-border)' } : {}}
+          />
+          <StatCard
+            label="Avg. Safety Stock"
+            value={`${avgSafetyStock.toLocaleString('en-IN')} units`}
+            subtext={`Protecting ${Math.round(serviceLevel * 100)}% service`}
+          />
+          <StatCard
+            label="Delivery Time"
+            value={`${leadTimeDays} days`}
+            subtext="From supplier to warehouse"
+          />
         </div>
-      </div>
 
-      {/* TAB 1: Recommendations Table */}
-      {activeTab === 'recommendations' && (
-        <div className="card" style={{ padding: '1.5rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+        {/* ── Settings & Filters ── */}
+        <Card title="Settings & Filters" icon={Sliders} subtitle="Change these to see how stock levels would change.">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '20px' }}>
+            {/* Search */}
             <div>
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                Stock Purchase & Reorder Action Table
-              </h3>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                Rule: Order new stock whenever current store inventory touches the <strong>Reorder Level</strong>.
-              </p>
+              <label style={labelStyle}>Search Product ID</label>
+              <div style={{ position: 'relative' }}>
+                <Search size={15} style={{ position: 'absolute', left: '10px', top: '9px', color: 'var(--text-muted)' }} />
+                <input
+                  type="text"
+                  placeholder="e.g. 19512"
+                  value={searchSKU}
+                  onChange={(e) => setSearchSKU(e.target.value)}
+                  style={inputStyle}
+                />
+              </div>
             </div>
-            <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-              Showing {filteredData.length} records
+
+            {/* City filter */}
+            <div>
+              <label style={labelStyle}>City / Warehouse</label>
+              <select
+                value={selectedCity}
+                onChange={(e) => setSelectedCity(e.target.value)}
+                style={selectStyle}
+              >
+                <option value="ALL">All Cities</option>
+                <option value="Delhi">Delhi</option>
+                <option value="Bengaluru">Bengaluru</option>
+                <option value="Mumbai">Mumbai</option>
+                <option value="HR-NCR">HR-NCR</option>
+              </select>
             </div>
-          </div>
 
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
-              <thead>
-                <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                  <th
-                    onClick={() => toggleSort('product_id')}
-                    style={{ padding: '0.75rem', textAlign: 'left', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                      Product Code <ArrowUpDown size={12} />
-                    </div>
-                  </th>
-                  <th
-                    onClick={() => toggleSort('city_name')}
-                    style={{ padding: '0.75rem', textAlign: 'left', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                      Store / Hub <ArrowUpDown size={12} />
-                    </div>
-                  </th>
-                  <th
-                    onClick={() => toggleSort('mean_daily_demand')}
-                    style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.3rem' }}>
-                      Daily Sales (Avg/Day) <ArrowUpDown size={12} />
-                    </div>
-                  </th>
-                  <th
-                    onClick={() => toggleSort('calculated_ss')}
-                    style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.3rem' }}>
-                      Emergency Buffer <ArrowUpDown size={12} />
-                    </div>
-                  </th>
-                  <th
-                    onClick={() => toggleSort('calculated_rop')}
-                    style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.3rem' }}>
-                      Reorder Level (Order at this) <ArrowUpDown size={12} />
-                    </div>
-                  </th>
-                  <th
-                    onClick={() => toggleSort('calculated_tsl')}
-                    style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.3rem' }}>
-                      Full Capacity Stock <ArrowUpDown size={12} />
-                    </div>
-                  </th>
-                  <th style={{ padding: '0.75rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>
-                    What To Do Today
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredData.slice(0, 100).map((row, idx) => (
-                  <tr
-                    key={`${row.product_id}-${row.city_name}-${idx}`}
-                    style={{
-                      borderBottom: '1px solid var(--border-subtle)',
-                      backgroundColor: idx % 2 === 0 ? 'transparent' : 'rgba(255, 255, 255, 0.01)',
-                    }}
-                  >
-                    <td style={{ padding: '0.75rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                      #{row.product_id}
-                    </td>
-                    <td style={{ padding: '0.75rem', color: 'var(--text-secondary)' }}>
-                      {row.city_name}
-                    </td>
-                    <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 500, color: 'var(--text-primary)' }}>
-                      {Math.round(row.mean_daily_demand || row.avg_daily_demand || 0).toLocaleString()}
-                    </td>
-                    <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 600, color: 'var(--accent-cyan)' }}>
-                      {(row.calculated_ss || 0).toLocaleString()}
-                    </td>
-                    <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 700, color: 'var(--accent-amber)' }}>
-                      {(row.calculated_rop || 0).toLocaleString()}
-                    </td>
-                    <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 500, color: 'var(--text-primary)' }}>
-                      {(row.calculated_tsl || 0).toLocaleString()}
-                    </td>
-                    <td style={{ padding: '0.75rem', textAlign: 'center' }}>
-                      <span
-                        style={{
-                          padding: '0.25rem 0.65rem',
-                          borderRadius: '6px',
-                          fontSize: '0.75rem',
-                          fontWeight: 600,
-                          backgroundColor: row.badgeBg,
-                          color: row.statusColor,
-                          display: 'inline-block',
-                        }}
-                      >
-                        {row.actionText}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            {/* Lead time slider (Tab 1) */}
+            {activeTab === 'recommendations' && (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <label style={labelStyle}>Supplier Delivery Time</label>
+                  <span style={{ fontSize: '13px', fontWeight: 700, color: 'var(--accent-primary)' }}>{leadTimeDays} days</span>
+                </div>
+                <input
+                  type="range"
+                  min="1"
+                  max="14"
+                  step="1"
+                  value={leadTimeDays}
+                  onChange={(e) => setLeadTimeDays(Number(e.target.value))}
+                  style={{ width: '100%', accentColor: 'var(--accent-primary)', cursor: 'pointer' }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-muted)' }}>
+                  <span>1 day</span>
+                  <span>14 days</span>
+                </div>
+              </div>
+            )}
 
-            {filteredData.length === 0 && !loading && (
-              <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
-                No inventory records match the selected filter.
+            {/* Service level (Tab 1) */}
+            {activeTab === 'recommendations' && (
+              <div>
+                <label style={labelStyle}>Service Level (target availability)</label>
+                <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
+                  {[0.90, 0.95, 0.98, 0.99].map((lvl) => (
+                    <button
+                      key={lvl}
+                      onClick={() => setServiceLevel(lvl)}
+                      className={serviceLevel === lvl ? 'diq-btn diq-btn-primary diq-btn-sm' : 'diq-btn diq-btn-secondary diq-btn-sm'}
+                      style={{ flex: 1 }}
+                    >
+                      {Math.round(lvl * 100)}%
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
           </div>
-        </div>
-      )}
+        </Card>
 
-      {/* TAB 2: Daily Simulation Status Table */}
-      {activeTab === 'simulation' && (
-        <div className="card" style={{ padding: '1.5rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
-            <div>
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                Daily Inventory Movement Simulation Status
-              </h3>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                Simulation Formula: <code>Closing Stock = Opening Stock + Stock Received - Sales Quantity</code>
-              </p>
-            </div>
-            <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-              Showing {filteredSimulation.length} daily snapshots
-            </div>
-          </div>
-
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
-              <thead>
-                <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                  <th style={{ padding: '0.75rem', textAlign: 'left', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Date</th>
-                  <th style={{ padding: '0.75rem', textAlign: 'left', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>SKU & Hub</th>
-                  <th style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Opening</th>
-                  <th style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Received</th>
-                  <th style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Sales</th>
-                  <th style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Closing Stock</th>
-                  <th style={{ padding: '0.75rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Days Cover</th>
-                  <th style={{ padding: '0.75rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Risk Status</th>
-                  <th style={{ padding: '0.75rem', textAlign: 'left', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Action Guidance</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredSimulation.slice(0, 100).map((row, idx) => {
-                  const riskColor =
-                    row.stockout_risk === 'CRITICAL_STOCKOUT'
-                      ? 'var(--accent-rose)'
-                      : row.stockout_risk === 'REORDER_RECOMMENDED'
-                      ? 'var(--accent-amber)'
-                      : 'var(--accent-emerald)';
-
-                  const riskBg =
-                    row.stockout_risk === 'CRITICAL_STOCKOUT'
-                      ? 'rgba(244, 63, 94, 0.15)'
-                      : row.stockout_risk === 'REORDER_RECOMMENDED'
-                      ? 'rgba(245, 158, 11, 0.15)'
-                      : 'rgba(16, 185, 129, 0.15)';
-
-                  return (
-                    <tr
-                      key={`${row.product_id}-${row.snapshot_date}-${idx}`}
-                      style={{
-                        borderBottom: '1px solid var(--border-subtle)',
-                        backgroundColor: idx % 2 === 0 ? 'transparent' : 'rgba(255, 255, 255, 0.01)',
-                      }}
-                    >
-                      <td style={{ padding: '0.75rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                        {row.snapshot_date}
-                      </td>
-                      <td style={{ padding: '0.75rem' }}>
-                        <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>#{row.product_id}</div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{row.city_name}</div>
-                      </td>
-                      <td style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)' }}>
-                        {Math.round(row.opening_stock).toLocaleString()}
-                      </td>
-                      <td style={{ padding: '0.75rem', textAlign: 'right', color: row.stock_received > 0 ? 'var(--accent-cyan)' : 'var(--text-muted)' }}>
-                        {row.stock_received > 0 ? `+${Math.round(row.stock_received).toLocaleString()}` : '0'}
-                      </td>
-                      <td style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--accent-rose)' }}>
-                        -{Math.round(row.sales_quantity).toLocaleString()}
-                      </td>
-                      <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 700, color: '#fff' }}>
-                        {Math.round(row.closing_stock).toLocaleString()}
-                      </td>
-                      <td style={{ padding: '0.75rem', textAlign: 'center' }}>
-                        <span style={{ fontWeight: 600, color: row.days_of_cover < 3 ? 'var(--accent-rose)' : 'var(--accent-cyan)' }}>
-                          {row.days_of_cover}d
-                        </span>
-                      </td>
-                      <td style={{ padding: '0.75rem', textAlign: 'center' }}>
-                        <span
-                          style={{
-                            padding: '0.2rem 0.55rem',
-                            borderRadius: '4px',
-                            fontSize: '0.725rem',
-                            fontWeight: 700,
-                            backgroundColor: riskBg,
-                            color: riskColor,
-                            display: 'inline-block',
-                          }}
-                        >
-                          {row.stockout_risk}
-                        </span>
-                      </td>
-                      <td style={{ padding: '0.75rem', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
-                        {row.action_text}
+        {/* ── TAB 1: Main Recommendations Data Table ── */}
+        {activeTab === 'recommendations' && (
+          <Card
+            title="Stock Levels & Reorder Points"
+            subtitle="Calculated with King's safety stock formula accounting for lead time variance."
+            actions={
+              <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                Showing {filteredData.length} products
+              </span>
+            }
+          >
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border-subtle)', backgroundColor: 'var(--bg-surface-subtle)' }}>
+                    <SortHeader field="product_id" label="Product ID" />
+                    <SortHeader field="city_name" label="City" />
+                    <SortHeader field="mean_daily_demand" label="Daily Demand" align="right" />
+                    <SortHeader field="calculated_ss" label="Safety Stock" align="right" />
+                    <SortHeader field="calculated_rop" label="Reorder At" align="right" />
+                    <SortHeader field="calculated_tsl" label="Target Stock" align="right" />
+                    <th style={{ ...thStyle, textAlign: 'center' }}>Status</th>
+                    <th style={{ ...thStyle, textAlign: 'center' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredData.length === 0 && !loading ? (
+                    <tr>
+                      <td colSpan="8" style={{ padding: '40px 16px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                        No products match your filters.
                       </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  ) : (
+                    filteredData.map((row) => {
+                      return (
+                        <tr
+                          key={`${row.product_id}-${row.city_name}`}
+                          style={{
+                            borderBottom: '1px solid var(--border-subtle)',
+                            transition: 'background-color 0.1s ease',
+                          }}
+                          onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--bg-surface-hover)'; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                        >
+                          <td style={tdStyle}>
+                            <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                              #{row.product_id}
+                            </span>
+                          </td>
+                          <td style={tdStyle}>{row.city_name}</td>
+                          <td style={{ ...tdStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                            {Math.round(row.mean_daily_demand || row.avg_daily_demand || 0).toLocaleString('en-IN')} units
+                          </td>
+                          <td style={{ ...tdStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                            <div style={{ fontWeight: 600 }}>{row.calculated_ss?.toLocaleString('en-IN')}</div>
+                            {row.ss_delta > 0 && (
+                              <div style={{ fontSize: '10px', color: 'var(--accent-amber)', opacity: 0.9 }}>
+                                +{row.ss_delta} lead-time buffer
+                              </div>
+                            )}
+                          </td>
+                          <td style={{ ...tdStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                            <span style={{ color: 'var(--status-critical-text)', fontWeight: 600 }}>
+                              {row.calculated_rop?.toLocaleString('en-IN')}
+                            </span>
+                          </td>
+                          <td style={{ ...tdStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                            {row.calculated_tsl?.toLocaleString('en-IN')}
+                          </td>
+                          <td style={{ ...tdStyle, textAlign: 'center' }}>
+                            <StatusBadge
+                              variant={row.statusVariant}
+                              label={row.actionText}
+                              size="sm"
+                            />
+                          </td>
+                          <td style={{ ...tdStyle, textAlign: 'center' }}>
+                            <div style={{ display: 'flex', gap: '6px', justifyContent: 'center' }}>
+                              <button
+                                onClick={() => setSelectedExplainSku(row.product_id)}
+                                className="diq-btn diq-btn-secondary diq-btn-sm"
+                                title="Explain this recommendation"
+                                style={{ padding: '4px 8px' }}
+                              >
+                                <Eye size={12} /> Explain
+                              </button>
+                              <button
+                                onClick={() => setSelectedForwardBuySku(row.product_id)}
+                                className="diq-btn diq-btn-secondary diq-btn-sm"
+                                title="Forward Buy Analysis"
+                                style={{ padding: '4px 8px' }}
+                              >
+                                <ShoppingCart size={12} /> Bulk
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
 
-            {filteredSimulation.length === 0 && !loading && (
-              <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
-                No simulation records found for the selected filter.
+            {/* Freshness Bar */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '14px',
+              paddingTop: '12px', borderTop: '1px solid var(--border-subtle)', flexWrap: 'wrap',
+              gap: '10px', fontSize: '12px', color: 'var(--text-muted)',
+            }}>
+              <div>
+                Last calculated: {freshness?.computed_at ? new Date(freshness.computed_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : 'just now'}
+                {' · '}
+                <button
+                  onClick={handleRecomputeNow}
+                  disabled={recomputing}
+                  style={{ background: 'none', border: 'none', color: 'var(--accent-primary)', cursor: 'pointer', textDecoration: 'underline', padding: 0, fontSize: '12px', fontWeight: 500 }}
+                >
+                  {recomputing ? 'Recalculating...' : 'Recalculate now'}
+                </button>
               </div>
-            )}
-          </div>
-        </div>
+
+              {freshness?.is_stale && (
+                <StatusBadge variant="warning" label="New data available — recalculate recommended" size="sm" />
+              )}
+            </div>
+          </Card>
+        )}
+
+        {/* ── TAB 2: Daily Movement Simulation Status Table ── */}
+        {activeTab === 'simulation' && (
+          <Card
+            title="Daily Inventory Movement Simulation Status"
+            subtitle="Simulation Formula: Closing Stock = Opening Stock + Stock Received - Sales Quantity"
+            actions={
+              <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                Showing {filteredSimulation.length} daily snapshots
+              </span>
+            }
+          >
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border-subtle)', backgroundColor: 'var(--bg-surface-subtle)' }}>
+                    <th style={{ ...thStyle, textAlign: 'left' }}>Date</th>
+                    <th style={{ ...thStyle, textAlign: 'left' }}>SKU & Hub</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>Opening</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>Received</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>Sales</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>Closing Stock</th>
+                    <th style={{ ...thStyle, textAlign: 'center' }}>Days Cover</th>
+                    <th style={{ ...thStyle, textAlign: 'center' }}>Risk Status</th>
+                    <th style={{ ...thStyle, textAlign: 'left' }}>Action Guidance</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredSimulation.slice(0, 100).map((row, idx) => {
+                    const riskVariant =
+                      row.stockout_risk === 'CRITICAL_STOCKOUT'
+                        ? 'critical'
+                        : row.stockout_risk === 'REORDER_RECOMMENDED'
+                        ? 'warning'
+                        : 'success';
+
+                    return (
+                      <tr
+                        key={`${row.product_id}-${row.snapshot_date}-${idx}`}
+                        style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                      >
+                        <td style={{ ...tdStyle, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                          {row.snapshot_date}
+                        </td>
+                        <td style={tdStyle}>
+                          <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>#{row.product_id}</div>
+                          <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{row.city_name}</div>
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'right', color: 'var(--text-muted)' }}>
+                          {Math.round(row.opening_stock).toLocaleString('en-IN')}
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'right', color: row.stock_received > 0 ? 'var(--accent-primary)' : 'var(--text-muted)' }}>
+                          {row.stock_received > 0 ? `+${Math.round(row.stock_received).toLocaleString('en-IN')}` : '0'}
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'right', color: 'var(--status-critical-text)' }}>
+                          -{Math.round(row.sales_quantity).toLocaleString('en-IN')}
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'right', fontWeight: 700, color: 'var(--text-primary)' }}>
+                          {Math.round(row.closing_stock).toLocaleString('en-IN')}
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'center' }}>
+                          <span style={{ fontWeight: 600, color: row.days_of_cover < 3 ? 'var(--status-critical-text)' : 'var(--text-primary)' }}>
+                            {row.days_of_cover}d
+                          </span>
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'center' }}>
+                          <StatusBadge variant={riskVariant} label={row.stockout_risk} size="sm" />
+                        </td>
+                        <td style={{ ...tdStyle, color: 'var(--text-secondary)', fontSize: '12px' }}>
+                          {row.action_text}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+
+              {filteredSimulation.length === 0 && !loading && (
+                <div style={{ textAlign: 'center', padding: '40px 16px', color: 'var(--text-muted)' }}>
+                  No simulation records found for the selected filter.
+                </div>
+              )}
+            </div>
+          </Card>
+        )}
+
+        {/* ── Forward Buy Simulator ── */}
+        {selectedForwardBuySku && (
+          <Card
+            title={`Bulk Purchase Simulator — Product #${selectedForwardBuySku}`}
+            subtitle="See if buying more at once would save money."
+            actions={
+              <button onClick={() => setSelectedForwardBuySku(null)} className="diq-btn diq-btn-secondary diq-btn-sm">
+                <X size={14} /> Close
+              </button>
+            }
+          >
+            <ForwardBuyWidget productId={selectedForwardBuySku} />
+          </Card>
+        )}
+      </div>
+
+      {/* SKU Explainability Trace Modal */}
+      {selectedExplainSku && (
+        <SkuExplainabilityModal
+          productId={selectedExplainSku}
+          onClose={() => setSelectedExplainSku(null)}
+        />
       )}
-    </div>
+    </PageShell>
   );
 }
+
+// Shared styles
+const thStyle = {
+  padding: '10px 14px',
+  fontSize: '11px',
+  fontWeight: 600,
+  textTransform: 'uppercase',
+  letterSpacing: '0.05em',
+  color: 'var(--text-muted)',
+  whiteSpace: 'nowrap',
+};
+
+const tdStyle = {
+  padding: '11px 14px',
+  verticalAlign: 'middle',
+  color: 'var(--text-primary)',
+};
+
+const labelStyle = {
+  display: 'block',
+  fontSize: '11px',
+  fontWeight: 600,
+  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
+  color: 'var(--text-muted)',
+  marginBottom: '4px',
+};
+
+const inputStyle = {
+  width: '100%',
+  padding: '8px 8px 8px 32px',
+  borderRadius: 'var(--border-radius-md)',
+  border: '1px solid var(--border-strong)',
+  backgroundColor: '#ffffff',
+  color: 'var(--text-primary)',
+  fontSize: '13px',
+};
+
+const selectStyle = {
+  width: '100%',
+  padding: '8px 10px',
+  borderRadius: 'var(--border-radius-md)',
+  border: '1px solid var(--border-strong)',
+  backgroundColor: '#ffffff',
+  color: 'var(--text-primary)',
+  fontSize: '13px',
+};

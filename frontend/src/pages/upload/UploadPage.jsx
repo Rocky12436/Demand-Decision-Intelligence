@@ -1,12 +1,16 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import {
+  Upload,
   UploadCloud,
   FileSpreadsheet,
   CheckCircle2,
   AlertTriangle,
+  XCircle,
+  Download,
+  Trash2,
+  Loader2,
   RefreshCw,
   Info,
-  Download,
   Check,
   X,
   FileCheck,
@@ -14,36 +18,91 @@ import {
   ShieldCheck,
   Calendar,
   Layers,
-  HelpCircle
+  HelpCircle,
 } from "lucide-react";
-import { uploadSalesFile, getUploads } from "../../services/api";
-import { Link } from "react-router-dom";
+import {
+  uploadSalesFile,
+  getUploads,
+  resolveSkus,
+  getProducts,
+  getFailedRowsDownloadUrl,
+  deleteUploadJob,
+  getUploadJobStatus,
+} from "../../services/api";
+import {
+  PageShell,
+  PageHeader,
+  Card,
+  StatCard,
+  StatusBadge,
+  DataTable,
+  EmptyState,
+  SegmentedControl,
+} from "../../components/ui";
 
 export default function UploadPage() {
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [jobProgress, setJobProgress] = useState(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [uploads, setUploads] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [skuSelections, setSkuSelections] = useState({});
+  const [resolving, setResolving] = useState(false);
+  const [resolveSuccessMsg, setResolveSuccessMsg] = useState("");
+  const [conflictMode, setConflictMode] = useState("REPLACE");
+  const [allowDuplicate, setAllowDuplicate] = useState(false);
+  const [duplicateConflict, setDuplicateConflict] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
   const [dragActive, setDragActive] = useState(false);
-  const [showGuide, setShowGuide] = useState(false);
 
   const loadUploads = async () => {
     try {
       const data = await getUploads();
       setUploads(data.uploads || []);
     } catch (err) {
-      console.error(err);
+      console.error("Failed to load uploads:", err);
+    }
+  };
+
+  const loadProducts = async () => {
+    try {
+      const prods = await getProducts(200);
+      setProducts(prods || []);
+    } catch (err) {
+      console.error("Failed to load products list:", err);
     }
   };
 
   useEffect(() => {
     loadUploads();
+    loadProducts();
   }, []);
+
+  // Initialize SKU selections whenever result changes
+  useEffect(() => {
+    if (result && result.unmapped_skus && Array.isArray(result.unmapped_skus)) {
+      const initial = {};
+      result.unmapped_skus.forEach((item) => {
+        const sku = typeof item === "string" ? item : item.sku;
+        const suggestion = item.suggested_mapping?.product_id;
+        const confidence = item.suggested_mapping?.confidence || 0;
+        // Pre-fill if confidence is high (>= 0.75)
+        if (suggestion && confidence >= 0.75) {
+          initial[sku] = suggestion;
+        } else {
+          initial[sku] = "";
+        }
+      });
+      setSkuSelections(initial);
+    }
+  }, [result]);
 
   const handleFile = (selectedFile) => {
     setError("");
     setResult(null);
+    setResolveSuccessMsg("");
 
     if (!selectedFile) {
       setFile(null);
@@ -57,6 +116,11 @@ export default function UploadPage() {
     }
 
     setFile(selectedFile);
+  };
+
+  const handleFileChange = (event) => {
+    const selectedFile = event.target.files[0];
+    handleFile(selectedFile);
   };
 
   const handleDrag = (e) => {
@@ -78,28 +142,6 @@ export default function UploadPage() {
     }
   };
 
-  const handleUpload = async () => {
-    if (!file) {
-      setError("Please select a sales CSV spreadsheet first.");
-      return;
-    }
-
-    try {
-      setUploading(true);
-      setError("");
-      setResult(null);
-
-      const data = await uploadSalesFile(file);
-      setResult(data);
-      await loadUploads();
-      setFile(null);
-    } catch (err) {
-      setError(err.message || "Failed to upload file. Please verify CSV format.");
-    } finally {
-      setUploading(false);
-    }
-  };
-
   const downloadSampleTemplate = () => {
     const csvContent =
       "date_,city_name,order_id,cart_id,dim_customer_key,procured_quantity,unit_selling_price,total_discount_amount,product_id,total_weighted_landing_price\n" +
@@ -117,419 +159,580 @@ export default function UploadPage() {
     document.body.removeChild(link);
   };
 
+  const handleUpload = async () => {
+    if (!file) {
+      setError("Please select a sales CSV spreadsheet first.");
+      return;
+    }
+
+    try {
+      setUploading(true);
+      setError("");
+      setResult(null);
+      setJobProgress(null);
+      setDuplicateConflict(null);
+      setResolveSuccessMsg("");
+
+      const data = await uploadSalesFile(file, {
+        conflict_mode: conflictMode,
+        allow_duplicate: allowDuplicate,
+      });
+
+      if (data && data.isConflict) {
+        setDuplicateConflict(data);
+        setUploading(false);
+      } else if (data && (data.status === "pending" || data.poll_url)) {
+        const jobId = data.job_id || data.upload_id;
+        setJobProgress({
+          job_id: jobId,
+          status: "pending",
+          current_stage: "parsing",
+          progress_pct: 10,
+        });
+
+        const pollInterval = setInterval(async () => {
+          try {
+            const statusData = await getUploadJobStatus(jobId);
+            setJobProgress({
+              job_id: jobId,
+              status: statusData.status,
+              current_stage: statusData.current_stage || "processing",
+              progress_pct: statusData.progress_pct || 0,
+            });
+
+            if (["COMPLETED", "PARTIAL", "REJECTED", "FAILED"].includes(statusData.status)) {
+              clearInterval(pollInterval);
+              setJobProgress(null);
+              setResult(statusData);
+              await loadUploads();
+              setFile(null);
+              setUploading(false);
+            }
+          } catch (pollErr) {
+            clearInterval(pollInterval);
+            setJobProgress(null);
+            setError(`Status polling failed: ${pollErr.message}`);
+            setUploading(false);
+          }
+        }, 2000);
+      } else {
+        setResult(data);
+        await loadUploads();
+        setFile(null);
+        setUploading(false);
+      }
+    } catch (err) {
+      setError(err.message || "Upload failed");
+      setUploading(false);
+    }
+  };
+
+  const handleDeleteUpload = async (uploadId) => {
+    if (!window.confirm(`Delete Upload #${uploadId}? This will remove all imported sales data from this file and may affect forecasts.`)) {
+      return;
+    }
+
+    try {
+      setDeletingId(uploadId);
+      setError("");
+      await deleteUploadJob(uploadId);
+      setResolveSuccessMsg(`Upload #${uploadId} successfully deleted.`);
+      await loadUploads();
+    } catch (err) {
+      setError(err.message || `Failed to delete upload #${uploadId}`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  // Determine state: SUCCESS (green), PARTIAL (amber), REJECTED (red)
+  const uploadState = useMemo(() => {
+    if (!result) return null;
+    const valid = Number(result.valid_rows || 0);
+    const invalid = Number(result.invalid_rows || (result.total_rows ? result.total_rows - valid : 0));
+    const status = String(result.status || "").toUpperCase();
+
+    if (valid === 0 || status === "REJECTED" || status === "FAILED") {
+      return "REJECTED";
+    }
+    if (invalid > 0 || status === "PARTIAL") {
+      return "PARTIAL";
+    }
+    return "SUCCESS";
+  }, [result]);
+
+  const stats = useMemo(() => {
+    if (!result) return null;
+    const total = Number(result.total_rows || 0);
+    const valid = Number(result.valid_rows || 0);
+    const invalid = Number(result.invalid_rows || (total ? total - valid : 0));
+    const unmappedCount = Array.isArray(result.unmapped_skus) ? result.unmapped_skus.length : 0;
+    const validPct = total > 0 ? Math.round((valid / total) * 100) : 0;
+
+    return { total, valid, invalid, unmappedCount, validPct };
+  }, [result]);
+
+  const handleResolveSkus = async () => {
+    if (!result || !result.upload_id) return;
+
+    const mappings = Object.entries(skuSelections)
+      .filter(([_, masterId]) => masterId && String(masterId).trim() !== "")
+      .map(([rawSku, masterId]) => ({
+        raw_sku: rawSku,
+        product_id: String(masterId).trim(),
+      }));
+
+    if (mappings.length === 0) {
+      setError("Please select at least one master product to map.");
+      return;
+    }
+
+    try {
+      setResolving(true);
+      setError("");
+      setResolveSuccessMsg("");
+      const res = await resolveSkus(result.upload_id, mappings);
+
+      setResolveSuccessMsg(
+        `Successfully linked ${res.resolved_count || mappings.length} SKU(s). Reprocessed rows were updated.`
+      );
+
+      // Remove newly mapped SKUs from the current unmapped list in state
+      const mappedSkusSet = new Set(mappings.map((m) => m.raw_sku));
+      setResult((prev) => ({
+        ...prev,
+        unmapped_skus: (prev.unmapped_skus || []).filter((item) => {
+          const sku = typeof item === "string" ? item : item.sku;
+          return !mappedSkusSet.has(sku);
+        }),
+      }));
+      await loadUploads();
+    } catch (err) {
+      setError(err.message || "Failed to resolve SKU mappings");
+    } finally {
+      setResolving(false);
+    }
+  };
+
   return (
-    <div style={{ maxWidth: "1300px", margin: "0 auto" }}>
-      {/* Header */}
-      <div style={{ marginBottom: "2rem" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "1rem" }}>
-          <div>
-            <h1 style={{ fontSize: "1.75rem", fontWeight: 700, color: "var(--text-primary)", display: "flex", alignItems: "center", gap: "0.6rem" }}>
-              <UploadCloud color="var(--accent-primary)" size={28} />
-              Upload Daily Sales Sheet
-            </h1>
-            <p style={{ color: "var(--text-secondary)", fontSize: "0.925rem", marginTop: "0.25rem" }}>
-              Upload your store's daily sales spreadsheet (CSV). The system automatically checks every item, updates your inventory, and tells you what to reorder today.
-            </p>
-          </div>
-
-          <button
-            onClick={downloadSampleTemplate}
-            className="btn"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "0.5rem",
-              backgroundColor: "var(--bg-surface-elevated)",
-              border: "1px solid var(--border-strong)",
-              color: "var(--accent-cyan)",
-              padding: "0.6rem 1.1rem",
-              borderRadius: "8px",
-              fontSize: "0.85rem",
-              fontWeight: 600,
-              cursor: "pointer"
-            }}
-          >
-            <Download size={15} />
-            Download Sample CSV Template
+    <PageShell maxWidth="1400px">
+      <PageHeader
+        icon={UploadCloud}
+        title="Upload Sales Sheet"
+        subtitle="Upload your store's daily sales spreadsheet (CSV). The system automatically checks every item, updates your inventory, and tells you what to reorder today."
+        actions={
+          <button onClick={downloadSampleTemplate} className="diq-btn diq-btn-secondary">
+            <Download size={14} /> Download Sample Template
           </button>
-        </div>
-      </div>
+        }
+      />
 
-      {/* 3-Step Simple Guide Card */}
-      <div className="card" style={{ padding: "1.25rem 1.5rem", marginBottom: "1.5rem", backgroundColor: "rgba(59, 130, 246, 0.05)", border: "1px solid rgba(59, 130, 246, 0.2)" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.85rem" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontWeight: 600, color: "var(--accent-primary)", fontSize: "0.95rem" }}>
-            <HelpCircle size={18} />
-            How It Works in 3 Simple Steps
-          </div>
-          <button
-            onClick={() => setShowGuide(!showGuide)}
-            style={{ background: "none", border: "none", color: "var(--text-secondary)", fontSize: "0.8rem", cursor: "pointer", textDecoration: "underline" }}
-          >
-            {showGuide ? "Hide Column Details" : "View Required Spreadsheet Columns"}
-          </button>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "1rem" }}>
-          <div style={{ display: "flex", gap: "0.75rem", alignItems: "flex-start" }}>
-            <div style={{ width: "26px", height: "26px", borderRadius: "50%", backgroundColor: "var(--accent-primary)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: "0.8rem", flexShrink: 0 }}>1</div>
-            <div>
-              <div style={{ fontWeight: 600, color: "var(--text-primary)", fontSize: "0.85rem" }}>Export Daily Sales</div>
-              <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)" }}>Export your billing/POS sales report as a <code>.csv</code> file.</div>
-            </div>
-          </div>
-
-          <div style={{ display: "flex", gap: "0.75rem", alignItems: "flex-start" }}>
-            <div style={{ width: "26px", height: "26px", borderRadius: "50%", backgroundColor: "var(--accent-primary)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: "0.8rem", flexShrink: 0 }}>2</div>
-            <div>
-              <div style={{ fontWeight: 600, color: "var(--text-primary)", fontSize: "0.85rem" }}>Drop File Below</div>
-              <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)" }}>Drag and drop or select the file in the upload box.</div>
-            </div>
-          </div>
-
-          <div style={{ display: "flex", gap: "0.75rem", alignItems: "flex-start" }}>
-            <div style={{ width: "26px", height: "26px", borderRadius: "50%", backgroundColor: "var(--accent-primary)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: "0.8rem", flexShrink: 0 }}>3</div>
-            <div>
-              <div style={{ fontWeight: 600, color: "var(--text-primary)", fontSize: "0.85rem" }}>Instant Decision Update</div>
-              <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)" }}>The system immediately checks for errors and tells you how much stock to reorder.</div>
-            </div>
-          </div>
-        </div>
-
-        {/* Expandable column guide */}
-        {showGuide && (
-          <div style={{ marginTop: "1rem", paddingTop: "1rem", borderTop: "1px solid rgba(255,255,255,0.06)", fontSize: "0.8rem" }}>
-            <div style={{ fontWeight: 600, color: "#fff", marginBottom: "0.5rem" }}>Expected Spreadsheet Columns:</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "0.5rem" }}>
-              <div style={{ color: "var(--text-secondary)" }}>• <strong>date_</strong>: Sale date (YYYY-MM-DD)</div>
-              <div style={{ color: "var(--text-secondary)" }}>• <strong>city_name</strong>: Store hub (e.g. Delhi, Mumbai)</div>
-              <div style={{ color: "var(--text-secondary)" }}>• <strong>product_id</strong>: Product code from catalog</div>
-              <div style={{ color: "var(--text-secondary)" }}>• <strong>procured_quantity</strong>: Units sold</div>
-              <div style={{ color: "var(--text-secondary)" }}>• <strong>unit_selling_price</strong>: Selling price per unit</div>
-              <div style={{ color: "var(--text-secondary)" }}>• <strong>order_id</strong>: Bill / Order number</div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Main Upload Dropzone Card */}
-      <div className="card" style={{ padding: "2rem", marginBottom: "1.5rem" }}>
-        <div
-          onDragEnter={handleDrag}
-          onDragLeave={handleDrag}
-          onDragOver={handleDrag}
-          onDrop={handleDrop}
-          style={{
-            border: dragActive ? "2px dashed var(--accent-primary)" : "2px dashed var(--border-strong)",
-            borderRadius: "12px",
-            padding: "3rem 1.5rem",
-            textAlign: "center",
-            backgroundColor: dragActive ? "rgba(59, 130, 246, 0.1)" : "var(--bg-surface-elevated)",
-            cursor: "pointer",
-            transition: "all 0.2s ease",
-            position: "relative"
-          }}
-        >
-          <input
-            type="file"
-            accept=".csv"
-            onChange={(e) => handleFile(e.target.files[0])}
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              width: "100%",
-              height: "100%",
-              opacity: 0,
-              cursor: "pointer"
-            }}
-          />
-
-          <div style={{ width: "56px", height: "56px", borderRadius: "50%", backgroundColor: "rgba(59, 130, 246, 0.15)", color: "var(--accent-primary)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 1rem" }}>
-            <FileSpreadsheet size={28} />
-          </div>
-
-          <h3 style={{ fontSize: "1.1rem", fontWeight: 600, color: "var(--text-primary)", marginBottom: "0.3rem" }}>
-            {file ? file.name : "Drag & Drop Your Sales CSV Here"}
-          </h3>
-          <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginBottom: "1rem" }}>
-            {file ? `${(file.size / 1024).toFixed(1)} KB • Click or drop another file to replace` : "or click to browse files from your computer"}
-          </p>
-
-          <span
-            style={{
-              display: "inline-block",
-              padding: "0.5rem 1.25rem",
-              borderRadius: "6px",
-              backgroundColor: "var(--bg-surface)",
-              border: "1px solid var(--border-strong)",
-              color: "#fff",
-              fontSize: "0.85rem",
-              fontWeight: 500
-            }}
-          >
-            {file ? "Change Selected File" : "Choose CSV File"}
-          </span>
-        </div>
-
-        {/* Selected File Details & Upload Action */}
-        {file && (
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "1.25rem", padding: "1rem", backgroundColor: "var(--bg-surface-elevated)", borderRadius: "8px", border: "1px solid var(--border-strong)", flexWrap: "wrap", gap: "1rem" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-              <CheckCircle2 color="var(--accent-emerald)" size={20} />
-              <div>
-                <div style={{ fontWeight: 600, color: "#fff", fontSize: "0.9rem" }}>{file.name}</div>
-                <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Ready to verify • {(file.size / 1024).toFixed(1)} KB</div>
-              </div>
-            </div>
-
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        {/* ── Error Banner ── */}
+        {error && (
+          <div style={{
+            backgroundColor: 'var(--status-critical-bg)',
+            border: '1px solid var(--status-critical-border)',
+            borderRadius: 'var(--border-radius-md)',
+            padding: '14px 18px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            color: 'var(--status-critical-text)',
+            fontSize: '13px',
+          }}>
+            <XCircle size={18} style={{ flexShrink: 0 }} />
+            <div style={{ flex: 1 }}>{error}</div>
             <button
-              onClick={handleUpload}
-              disabled={uploading}
-              className="btn btn-primary"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "0.5rem",
-                padding: "0.7rem 1.5rem",
-                fontWeight: 600
-              }}
+              onClick={() => setError("")}
+              style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4 }}
             >
-              {uploading ? (
-                <>
-                  <RefreshCw size={16} className="animate-spin" />
-                  Verifying & Storing Rows...
-                </>
-              ) : (
-                <>
-                  <FileCheck size={16} />
-                  Analyze & Save Sales Sheet
-                </>
-              )}
+              <X size={14} />
             </button>
           </div>
         )}
 
-        {/* Error message */}
-        {error && (
-          <div style={{ marginTop: "1rem", padding: "0.85rem 1.25rem", backgroundColor: "rgba(244, 63, 94, 0.12)", border: "1px solid var(--accent-rose)", borderRadius: "8px", color: "var(--accent-rose)", fontSize: "0.875rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <AlertTriangle size={16} />
-            <span>{error}</span>
+        {/* ── Duplicate Conflict Resolution Card ── */}
+        {duplicateConflict && (
+          <div style={{
+            backgroundColor: 'var(--status-warning-bg)',
+            border: '1px solid var(--status-warning-border)',
+            borderRadius: 'var(--border-radius-md)',
+            padding: '16px 20px',
+            color: 'var(--text-primary)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px' }}>
+              <AlertTriangle size={18} style={{ color: 'var(--status-warning-text)' }} />
+              <strong style={{ fontSize: '14px' }}>Duplicate File Detected</strong>
+            </div>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '14px' }}>
+              This exact CSV file was already uploaded in <strong>Job #{duplicateConflict.prior_job_id}</strong>.
+              Would you like to import it again?
+            </p>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button
+                onClick={() => {
+                  setAllowDuplicate(true);
+                  setDuplicateConflict(null);
+                  setTimeout(() => handleUpload(), 50);
+                }}
+                className="diq-btn diq-btn-primary diq-btn-sm"
+              >
+                Upload Anyway
+              </button>
+              <button
+                onClick={() => {
+                  setDuplicateConflict(null);
+                  setFile(null);
+                }}
+                className="diq-btn diq-btn-secondary diq-btn-sm"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         )}
-      </div>
 
-      {/* Upload Results Card (Plain English) */}
-      {result && (
-        <div className="card" style={{ padding: "1.5rem", marginBottom: "1.5rem", border: "1px solid var(--accent-emerald)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.25rem", flexWrap: "wrap", gap: "0.5rem" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-              <div style={{ width: "28px", height: "28px", borderRadius: "50%", backgroundColor: "rgba(16, 185, 129, 0.2)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--accent-emerald)" }}>
-                <Check size={16} />
-              </div>
-              <h3 style={{ fontSize: "1.1rem", fontWeight: 600, color: "#fff" }}>
-                Sales Sheet Successfully Processed & Saved
-              </h3>
-            </div>
+        {/* ── Success Banner ── */}
+        {resolveSuccessMsg && (
+          <div style={{
+            backgroundColor: 'var(--status-success-bg)',
+            border: '1px solid var(--status-success-border)',
+            borderRadius: 'var(--border-radius-md)',
+            padding: '14px 18px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            color: 'var(--status-success-text)',
+            fontSize: '13px',
+          }}>
+            <CheckCircle2 size={18} style={{ flexShrink: 0 }} />
+            <div>{resolveSuccessMsg}</div>
+          </div>
+        )}
 
-            <Link
-              to="/inventory"
+        {/* ── Upload Area Card ── */}
+        <Card title="Upload Sales Spreadsheet" icon={FileSpreadsheet}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {/* Drag & Drop Zone */}
+            <div
+              onDragEnter={handleDrag}
+              onDragOver={handleDrag}
+              onDragLeave={handleDrag}
+              onDrop={handleDrop}
               style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.3rem",
-                color: "var(--accent-cyan)",
-                fontSize: "0.85rem",
-                fontWeight: 600,
-                textDecoration: "none"
+                border: dragActive ? '2px dashed var(--accent-primary)' : '2px dashed var(--border-subtle)',
+                borderRadius: 'var(--border-radius-lg)',
+                padding: '36px 20px',
+                textAlign: 'center',
+                backgroundColor: dragActive ? 'var(--bg-surface-hover)' : 'var(--bg-surface-subtle)',
+                transition: 'all 0.15s ease',
+                cursor: 'pointer',
               }}
             >
-              View Updated Reorder Plan <ArrowRight size={14} />
-            </Link>
-          </div>
-
-          {/* KPI Summary Tiles */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "1rem", marginBottom: "1.25rem" }}>
-            <div style={{ padding: "1rem", backgroundColor: "var(--bg-surface-elevated)", borderRadius: "8px" }}>
-              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }}>File Status</div>
-              <div style={{ fontSize: "1.2rem", fontWeight: 700, color: "var(--accent-emerald)", marginTop: "0.2rem" }}>
-                {result.status}
-              </div>
+              <input
+                type="file"
+                accept=".csv"
+                id="file-upload"
+                onChange={handleFileChange}
+                style={{ display: 'none' }}
+              />
+              <label htmlFor="file-upload" style={{ cursor: 'pointer', display: 'block' }}>
+                {file ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+                    <div style={{
+                      width: '40px', height: '40px', borderRadius: '50%',
+                      backgroundColor: 'var(--status-success-bg)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      color: 'var(--status-success-text)',
+                    }}>
+                      <Check size={20} />
+                    </div>
+                    <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: '15px' }}>{file.name}</span>
+                    <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                      {(file.size / 1024).toFixed(1)} KB — Ready to upload
+                    </span>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                    <UploadCloud size={32} style={{ color: 'var(--accent-primary)', marginBottom: '4px' }} />
+                    <span style={{ fontWeight: 500, color: 'var(--text-primary)', fontSize: '14px' }}>
+                      Drag and drop your sales CSV here, or click to browse
+                    </span>
+                    <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                      Supports standard comma-separated sales exports up to 100MB
+                    </span>
+                  </div>
+                )}
+              </label>
             </div>
 
-            <div style={{ padding: "1rem", backgroundColor: "var(--bg-surface-elevated)", borderRadius: "8px" }}>
-              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }}>Total Rows Read</div>
-              <div style={{ fontSize: "1.2rem", fontWeight: 700, color: "#fff", marginTop: "0.2rem" }}>
-                {result.total_rows}
-              </div>
-            </div>
-
-            <div style={{ padding: "1rem", backgroundColor: "var(--bg-surface-elevated)", borderRadius: "8px" }}>
-              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }}>Accepted & Stored</div>
-              <div style={{ fontSize: "1.2rem", fontWeight: 700, color: "var(--accent-cyan)", marginTop: "0.2rem" }}>
-                {result.valid_rows}
-              </div>
-            </div>
-
-            <div style={{ padding: "1rem", backgroundColor: "var(--bg-surface-elevated)", borderRadius: "8px" }}>
-              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }}>Rejected / Errors</div>
-              <div style={{ fontSize: "1.2rem", fontWeight: 700, color: result.invalid_rows > 0 ? "var(--accent-rose)" : "var(--accent-emerald)", marginTop: "0.2rem" }}>
-                {result.invalid_rows}
-              </div>
-            </div>
-          </div>
-
-          {/* Plain English Verification Checklist */}
-          {result.validation && (
-            <div>
-              <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text-primary)", marginBottom: "0.6rem" }}>
-                Data Health Checklist
+            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  When data overlaps:
+                </span>
+                <SegmentedControl
+                  size="sm"
+                  value={conflictMode}
+                  onChange={setConflictMode}
+                  options={[
+                    { value: "REPLACE", label: "Replace existing dates" },
+                    { value: "APPEND", label: "Add to existing" },
+                    { value: "UPSERT", label: "Update duplicates" },
+                  ]}
+                />
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "0.75rem" }}>
-                <div style={{ padding: "0.75rem 1rem", backgroundColor: "rgba(255,255,255,0.02)", borderRadius: "6px", border: "1px solid var(--border-subtle)", display: "flex", alignItems: "center", gap: "0.6rem" }}>
-                  <Check size={16} color="var(--accent-emerald)" />
-                  <span style={{ fontSize: "0.825rem", color: "var(--text-secondary)" }}>All required columns present</span>
-                </div>
-
-                <div style={{ padding: "0.75rem 1rem", backgroundColor: "rgba(255,255,255,0.02)", borderRadius: "6px", border: "1px solid var(--border-subtle)", display: "flex", alignItems: "center", gap: "0.6rem" }}>
-                  {result.validation.invalid_dates === 0 ? <Check size={16} color="var(--accent-emerald)" /> : <X size={16} color="var(--accent-rose)" />}
-                  <span style={{ fontSize: "0.825rem", color: "var(--text-secondary)" }}>
-                    Dates valid ({result.validation.invalid_dates || 0} issues)
+              <button
+                onClick={handleUpload}
+                disabled={!file || uploading}
+                className="diq-btn diq-btn-primary"
+                style={{ padding: '10px 24px', fontSize: '14px', opacity: (!file || uploading) ? 0.5 : 1 }}
+              >
+                {uploading ? (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
+                    Processing...
                   </span>
-                </div>
-
-                <div style={{ padding: "0.75rem 1rem", backgroundColor: "rgba(255,255,255,0.02)", borderRadius: "6px", border: "1px solid var(--border-subtle)", display: "flex", alignItems: "center", gap: "0.6rem" }}>
-                  {result.validation.unmatched_product_ids === 0 ? <Check size={16} color="var(--accent-emerald)" /> : <X size={16} color="var(--accent-amber)" />}
-                  <span style={{ fontSize: "0.825rem", color: "var(--text-secondary)" }}>
-                    Product codes matched store catalog
+                ) : (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Upload size={16} />
+                    Upload & Validate
                   </span>
-                </div>
-
-                <div style={{ padding: "0.75rem 1rem", backgroundColor: "rgba(255,255,255,0.02)", borderRadius: "6px", border: "1px solid var(--border-subtle)", display: "flex", alignItems: "center", gap: "0.6rem" }}>
-                  {result.validation.negative_quantity === 0 ? <Check size={16} color="var(--accent-emerald)" /> : <X size={16} color="var(--accent-rose)" />}
-                  <span style={{ fontSize: "0.825rem", color: "var(--text-secondary)" }}>
-                    Quantities and prices positive & valid
-                  </span>
-                </div>
-              </div>
+                )}
+              </button>
             </div>
-          )}
-        </div>
-      )}
-
-      {/* Upload History Table */}
-      <div className="card" style={{ padding: "1.5rem" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.25rem" }}>
-          <div>
-            <h3 style={{ fontSize: "1.1rem", fontWeight: 600, color: "var(--text-primary)" }}>
-              Spreadsheet Upload History
-            </h3>
-            <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)" }}>
-              Audit trail of all sales files uploaded to the store system.
-            </p>
           </div>
-          <button
-            onClick={loadUploads}
-            className="btn"
+        </Card>
+
+        {/* ── Async Job Polling Progress ── */}
+        {jobProgress && (
+          <Card title="Ingestion in Progress" icon={RefreshCw}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '13px' }}>
+              <span style={{ color: 'var(--text-secondary)' }}>
+                Stage: <strong>{jobProgress.current_stage || "Processing"}</strong>
+              </span>
+              <span style={{ fontWeight: 600, color: 'var(--accent-primary)' }}>
+                {jobProgress.progress_pct || 10}%
+              </span>
+            </div>
+            <div style={{ height: '6px', borderRadius: '3px', backgroundColor: 'var(--bg-surface-subtle)', overflow: 'hidden' }}>
+              <div style={{
+                height: '100%',
+                width: `${jobProgress.progress_pct || 10}%`,
+                backgroundColor: 'var(--accent-primary)',
+                transition: 'width 0.3s ease',
+              }} />
+            </div>
+          </Card>
+        )}
+
+        {/* ── Upload Results Card ── */}
+        {result && stats && (
+          <Card
             style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "0.3rem",
-              backgroundColor: "var(--bg-surface-elevated)",
-              border: "1px solid var(--border-strong)",
-              color: "var(--text-secondary)",
-              padding: "0.45rem 0.85rem",
-              borderRadius: "6px",
-              fontSize: "0.8rem",
-              cursor: "pointer"
+              borderColor: uploadState === 'SUCCESS' ? 'var(--status-success-border)' :
+                           uploadState === 'PARTIAL' ? 'var(--status-warning-border)' : 'var(--status-critical-border)',
             }}
           >
-            <RefreshCw size={14} /> Refresh List
-          </button>
-        </div>
+            {/* Header */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              paddingBottom: '16px', borderBottom: '1px solid var(--border-subtle)',
+              flexWrap: 'wrap', gap: '12px',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div style={{
+                  width: '40px', height: '40px', borderRadius: '50%',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  backgroundColor: uploadState === 'SUCCESS' ? 'var(--status-success-bg)' :
+                                   uploadState === 'PARTIAL' ? 'var(--status-warning-bg)' : 'var(--status-critical-bg)',
+                  color: uploadState === 'SUCCESS' ? 'var(--status-success-text)' :
+                         uploadState === 'PARTIAL' ? 'var(--status-warning-text)' : 'var(--status-critical-text)',
+                }}>
+                  {uploadState === 'SUCCESS' ? <CheckCircle2 size={22} /> :
+                   uploadState === 'PARTIAL' ? <AlertTriangle size={22} /> : <XCircle size={22} />}
+                </div>
+                <div>
+                  <h3 style={{ fontSize: '16px', fontWeight: 700, margin: 0 }}>
+                    {uploadState === 'SUCCESS' ? 'All Rows Validated & Imported' :
+                     uploadState === 'PARTIAL' ? 'Partially Imported with Warnings' : 'Upload Rejected'}
+                  </h3>
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                    Job #{result.upload_id || result.job_id || '—'}
+                  </span>
+                </div>
+              </div>
 
-        {uploads.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "3rem", color: "var(--text-muted)" }}>
-            No sales spreadsheets have been uploaded yet. Upload your first CSV above.
-          </div>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.875rem" }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-                  <th style={{ padding: "0.75rem", textAlign: "left", color: "var(--text-muted)", fontSize: "0.78rem", textTransform: "uppercase" }}>File Name</th>
-                  <th style={{ padding: "0.75rem", textAlign: "center", color: "var(--text-muted)", fontSize: "0.78rem", textTransform: "uppercase" }}>Processing Status</th>
-                  <th style={{ padding: "0.75rem", textAlign: "right", color: "var(--text-muted)", fontSize: "0.78rem", textTransform: "uppercase" }}>Total Rows</th>
-                  <th style={{ padding: "0.75rem", textAlign: "right", color: "var(--text-muted)", fontSize: "0.78rem", textTransform: "uppercase" }}>Stored Rows</th>
-                  <th style={{ padding: "0.75rem", textAlign: "left", color: "var(--text-muted)", fontSize: "0.78rem", textTransform: "uppercase" }}>Upload Date</th>
-                </tr>
-              </thead>
-              <tbody>
-                {uploads.map((upload, idx) => {
-                  const isCompleted = upload.status === "COMPLETED";
-                  const isProcessing = upload.status === "PROCESSING" || upload.status === "VALIDATING";
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                {stats.invalid > 0 && result.upload_id && (
+                  <a
+                    href={getFailedRowsDownloadUrl(result.upload_id)}
+                    className="diq-btn diq-btn-secondary diq-btn-sm"
+                    download
+                  >
+                    <Download size={14} /> Download {stats.invalid} Failed Rows
+                  </a>
+                )}
+                <StatusBadge
+                  variant={uploadState === 'SUCCESS' ? 'success' : uploadState === 'PARTIAL' ? 'warning' : 'critical'}
+                  label={result.status || uploadState}
+                />
+              </div>
+            </div>
 
-                  const badgeColor = isCompleted
-                    ? "var(--accent-emerald)"
-                    : isProcessing
-                    ? "var(--accent-amber)"
-                    : "var(--accent-rose)";
+            {/* KPI Stats */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '12px', marginTop: '16px' }}>
+              <StatCard label="Total Rows" value={stats.total.toLocaleString()} />
+              <StatCard label="Accepted Rows" value={stats.valid.toLocaleString()} subtext={`${stats.validPct}% valid`} />
+              <StatCard
+                label="Rejected Rows"
+                value={stats.invalid.toLocaleString()}
+                style={stats.invalid > 0 ? { borderColor: 'var(--status-critical-border)' } : {}}
+              />
+              <StatCard label="Unmapped SKUs" value={stats.unmappedCount} />
+            </div>
 
-                  const badgeBg = isCompleted
-                    ? "rgba(16, 185, 129, 0.15)"
-                    : isProcessing
-                    ? "rgba(245, 158, 11, 0.15)"
-                    : "rgba(244, 63, 94, 0.15)";
+            {/* Unmapped SKU Resolution UI */}
+            {stats.unmappedCount > 0 && (
+              <div style={{
+                marginTop: '20px', padding: '16px',
+                borderRadius: 'var(--border-radius-md)',
+                backgroundColor: 'var(--bg-surface-subtle)',
+                border: '1px solid var(--border-subtle)',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                  <div>
+                    <h4 style={{ margin: 0, fontSize: '14px', fontWeight: 600 }}>Unmapped Products Detected</h4>
+                    <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                      Match raw incoming SKU identifiers with verified master products to include them in forecasting.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleResolveSkus}
+                    disabled={resolving}
+                    className="diq-btn diq-btn-primary diq-btn-sm"
+                  >
+                    {resolving ? 'Saving Mappings...' : 'Apply Mappings'}
+                  </button>
+                </div>
 
-                  return (
-                    <tr
-                      key={upload.id || idx}
-                      style={{
-                        borderBottom: "1px solid var(--border-subtle)",
-                        backgroundColor: idx % 2 === 0 ? "transparent" : "rgba(255, 255, 255, 0.01)"
-                      }}
-                    >
-                      <td style={{ padding: "0.75rem", fontWeight: 600, color: "#fff", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                        <FileSpreadsheet size={16} color="var(--accent-primary)" />
-                        {upload.filename || "sales_file.csv"}
-                      </td>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '10px' }}>
+                  {result.unmapped_skus.map((item, idx) => {
+                    const rawSku = typeof item === "string" ? item : item.sku;
+                    const suggestion = typeof item === "object" ? item.suggested_mapping : null;
 
-                      <td style={{ padding: "0.75rem", textAlign: "center" }}>
-                        <span
+                    return (
+                      <div key={idx} style={{
+                        padding: '10px 12px', borderRadius: '6px',
+                        backgroundColor: 'var(--bg-surface)', border: '1px solid var(--border-subtle)',
+                        fontSize: '12px',
+                      }}>
+                        <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: '6px' }}>
+                          SKU: {rawSku}
+                        </div>
+                        <select
+                          value={skuSelections[rawSku] || ""}
+                          onChange={(e) => setSkuSelections({ ...skuSelections, [rawSku]: e.target.value })}
                           style={{
-                            padding: "0.25rem 0.65rem",
-                            borderRadius: "6px",
-                            fontSize: "0.75rem",
-                            fontWeight: 700,
-                            backgroundColor: badgeBg,
-                            color: badgeColor,
-                            display: "inline-block"
+                            width: '100%', padding: '6px 8px', borderRadius: '4px',
+                            border: '1px solid var(--border-strong)', fontSize: '12px',
+                            backgroundColor: '#ffffff', color: 'var(--text-primary)',
                           }}
                         >
-                          {isCompleted ? "VERIFIED & SAVED" : upload.status}
-                        </span>
-                      </td>
-
-                      <td style={{ padding: "0.75rem", textAlign: "right", color: "var(--text-secondary)" }}>
-                        {upload.total_rows?.toLocaleString() || "—"}
-                      </td>
-
-                      <td style={{ padding: "0.75rem", textAlign: "right", fontWeight: 600, color: "var(--accent-cyan)" }}>
-                        {upload.processed_rows?.toLocaleString() || "—"}
-                      </td>
-
-                      <td style={{ padding: "0.75rem", color: "var(--text-muted)", fontSize: "0.8rem" }}>
-                        {upload.created_at ? new Date(upload.created_at).toLocaleString() : "Recently"}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                          <option value="">-- Link to Master Product --</option>
+                          {products.map((p) => (
+                            <option key={p.product_id} value={p.product_id}>
+                              #{p.product_id} - {p.product_name || `Product ${p.product_id}`}
+                            </option>
+                          ))}
+                        </select>
+                        {suggestion && (
+                          <div style={{ marginTop: '4px', fontSize: '10px', color: 'var(--accent-primary)' }}>
+                            Suggested: #{suggestion.product_id} ({Math.round((suggestion.confidence || 0) * 100)}% match)
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </Card>
         )}
+
+        {/* ── Upload History ── */}
+        <Card
+          title="Upload History"
+          icon={RefreshCw}
+          actions={
+            <button onClick={loadUploads} className="diq-btn diq-btn-secondary diq-btn-sm">
+              <RefreshCw size={12} /> Refresh
+            </button>
+          }
+        >
+          {uploads.length === 0 ? (
+            <EmptyState
+              icon={FileSpreadsheet}
+              title="No uploads yet"
+              description="Upload your first sales CSV to begin demand intelligence analysis."
+            />
+          ) : (
+            <DataTable
+              columns={[
+                { key: 'id', label: 'ID', render: (row) => `#${row.id}` },
+                { key: 'filename', label: 'File Name', render: (row) => <strong>{row.filename}</strong> },
+                {
+                  key: 'status',
+                  label: 'Status',
+                  render: (row) => (
+                    <StatusBadge
+                      variant={
+                        row.status === 'COMPLETED' || row.status === 'SUCCESS' ? 'success' :
+                        row.status === 'PARTIAL' ? 'warning' : 'critical'
+                      }
+                      label={row.status}
+                      size="sm"
+                    />
+                  ),
+                },
+                {
+                  key: 'rows',
+                  label: 'Rows Ingested',
+                  render: (row) => `${(row.processed_rows || 0).toLocaleString()} / ${(row.total_rows || 0).toLocaleString()}`,
+                },
+                {
+                  key: 'date',
+                  label: 'Date',
+                  render: (row) => row.created_at ? new Date(row.created_at).toLocaleString('en-IN') : 'Recent',
+                },
+                {
+                  key: 'actions',
+                  label: 'Actions',
+                  render: (row) => (
+                    <button
+                      onClick={() => handleDeleteUpload(row.id)}
+                      disabled={deletingId === row.id}
+                      className="diq-btn diq-btn-secondary diq-btn-sm"
+                      style={{ padding: '4px 8px', color: 'var(--status-critical-text)' }}
+                      title="Delete upload and its data"
+                    >
+                      <Trash2 size={12} /> {deletingId === row.id ? 'Deleting...' : 'Delete'}
+                    </button>
+                  ),
+                },
+              ]}
+              data={uploads}
+              keyField="id"
+            />
+          )}
+        </Card>
       </div>
-    </div>
+
+      <style>{`
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+      `}</style>
+    </PageShell>
   );
 }

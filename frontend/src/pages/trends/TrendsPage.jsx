@@ -1,18 +1,12 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import {
-  LineChart,
   TrendingUp,
   TrendingDown,
   AlertTriangle,
-  CheckCircle2,
-  Filter,
   Search,
   RefreshCw,
-  Zap,
   Activity,
-  Calendar,
-  ShieldAlert,
-  BarChart2
+  BarChart2,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -22,9 +16,18 @@ import {
   YAxis,
   Tooltip,
   CartesianGrid,
-  Cell
+  Cell,
 } from 'recharts';
 import api from '../../services/api';
+import {
+  PageShell,
+  PageHeader,
+  Card,
+  StatCard,
+  StatusBadge,
+  SegmentedControl,
+  EmptyState,
+} from '../../components/ui';
 
 export default function TrendsPage() {
   const [alerts, setAlerts] = useState([]);
@@ -76,14 +79,14 @@ export default function TrendsPage() {
     return alerts.filter((a) => String(a.product_id).includes(searchSKU.trim()));
   }, [alerts, searchSKU]);
 
-  // Chart data: Distribution by type and severity
+  // Chart data
   const chartData = useMemo(() => {
     if (!summary) return [];
     return [
-      { name: 'Spike Demand', count: summary.anomaly_type_breakdown?.SPIKE_DEMAND || 320, color: '#f59e0b' },
-      { name: 'Drop / Stockout', count: summary.anomaly_type_breakdown?.DROP_STOCKOUT || 415, color: '#ef4444' },
-      { name: 'Critical Severity', count: summary.severity_breakdown?.CRITICAL || 512, color: '#ec4899' },
-      { name: 'Medium Severity', count: summary.severity_breakdown?.MEDIUM || 223, color: '#3b82f6' },
+      { name: 'Demand Spikes', count: summary.anomaly_type_breakdown?.SPIKE_DEMAND || 320, color: 'var(--status-warning-icon)' },
+      { name: 'Sudden Drops', count: summary.anomaly_type_breakdown?.DROP_STOCKOUT || 415, color: 'var(--status-critical-icon)' },
+      { name: 'Critical', count: summary.severity_breakdown?.CRITICAL || 512, color: '#dc2626' },
+      { name: 'Medium', count: summary.severity_breakdown?.MEDIUM || 223, color: 'var(--accent-primary)' },
     ];
   }, [summary]);
 
@@ -93,316 +96,236 @@ export default function TrendsPage() {
   const criticalCount = summary?.severity_breakdown?.CRITICAL || 512;
 
   return (
-    <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '2rem' }}>
-        <div>
-          <h1 style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-            <Activity color="var(--accent-primary)" size={28} />
-            Trends & Outlier Anomaly Intelligence
-          </h1>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.925rem', marginTop: '0.25rem' }}>
-            Statistical & Isolation Forest outlier detection tracking unexpected demand spikes, drops, and stockout events.
-          </p>
+    <PageShell maxWidth="1400px">
+      <PageHeader
+        icon={Activity}
+        title="Unusual Activity & Alerts"
+        subtitle="Automatic detection of unexpected demand spikes, drops, and potential stockout situations."
+        actions={
+          <button onClick={loadData} disabled={loading} className="diq-btn diq-btn-secondary">
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            {loading ? 'Checking...' : 'Refresh'}
+          </button>
+        }
+      />
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+
+        {/* ── KPI Summary ── */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '12px' }}>
+          <StatCard label="Total Alerts" value={totalAnomalies.toLocaleString('en-IN')} subtext="Unusual events found" icon={AlertTriangle} />
+          <StatCard label="Demand Spikes" value={`${spikeCount.toLocaleString('en-IN')}`} subtext="Unexpected sales surges" />
+          <StatCard label="Sudden Drops" value={`${dropCount.toLocaleString('en-IN')}`} subtext="Possible stockout situations" />
+          <StatCard
+            label="Critical Alerts"
+            value={criticalCount.toLocaleString('en-IN')}
+            subtext="Need immediate attention"
+            style={criticalCount > 0 ? { borderColor: 'var(--status-critical-border)' } : {}}
+          />
         </div>
 
-        <button
-          className="btn btn-primary"
-          onClick={loadData}
-          disabled={loading}
-          style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 1.4rem' }}
+        {/* ── Chart + Filters ── */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '16px' }}>
+
+          {/* Chart */}
+          <Card title="Alert Breakdown" icon={BarChart2} subtitle="Distribution by type and severity.">
+            <div style={{ height: 200, width: '100%' }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData} margin={{ top: 10, right: 10, left: -15, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" />
+                  <XAxis dataKey="name" stroke="var(--text-muted)" fontSize={11} tickLine={false} />
+                  <YAxis stroke="var(--text-muted)" fontSize={11} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#ffffff',
+                      borderColor: 'var(--border-subtle)',
+                      borderRadius: 8,
+                      boxShadow: 'var(--shadow-dropdown)',
+                      fontSize: 12,
+                    }}
+                  />
+                  <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                    {chartData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.color} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </Card>
+
+          {/* Filters */}
+          <Card title="Filters" subtitle="Narrow down alerts to find what matters.">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+
+              {/* Search */}
+              <div>
+                <label style={labelStyle}>Search Product ID</label>
+                <div style={{ position: 'relative' }}>
+                  <Search size={15} style={{ position: 'absolute', left: '10px', top: '9px', color: 'var(--text-muted)' }} />
+                  <input
+                    type="text"
+                    placeholder="e.g. 176190"
+                    value={searchSKU}
+                    onChange={(e) => setSearchSKU(e.target.value)}
+                    style={{
+                      width: '100%', padding: '8px 8px 8px 32px',
+                      borderRadius: 'var(--border-radius-md)',
+                      border: '1px solid var(--border-strong)',
+                      backgroundColor: '#ffffff', color: 'var(--text-primary)',
+                      fontSize: '13px',
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Severity */}
+              <div>
+                <label style={labelStyle}>Severity Level</label>
+                <SegmentedControl
+                  size="sm"
+                  value={severityFilter}
+                  onChange={setSeverityFilter}
+                  options={[
+                    { value: 'ALL', label: 'All' },
+                    { value: 'CRITICAL', label: 'Critical' },
+                    { value: 'MEDIUM', label: 'Medium' },
+                    { value: 'LOW', label: 'Low' },
+                  ]}
+                />
+              </div>
+
+              {/* Type */}
+              <div>
+                <label style={labelStyle}>Event Type</label>
+                <SegmentedControl
+                  size="sm"
+                  value={typeFilter}
+                  onChange={setTypeFilter}
+                  options={[
+                    { value: 'ALL', label: 'All Types' },
+                    { value: 'SPIKE_DEMAND', label: 'Spikes' },
+                    { value: 'DROP_STOCKOUT', label: 'Drops' },
+                  ]}
+                />
+              </div>
+            </div>
+          </Card>
+        </div>
+
+        {/* ── Alerts Table ── */}
+        <Card
+          title="Detected Alerts"
+          subtitle="Unusual demand patterns compared to what was expected."
+          actions={<span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Showing {filteredAlerts.length} alerts</span>}
         >
-          <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
-          {loading ? 'Analyzing...' : 'Refresh Alerts'}
-        </button>
-      </div>
-
-      {/* KPI Cards */}
-      <div className="grid-kpi" style={{ marginBottom: '1.5rem' }}>
-        <div className="kpi-card">
-          <div className="kpi-title">Total Anomalies Detected</div>
-          <div className="kpi-value">{totalAnomalies.toLocaleString()}</div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Across holdout evaluation period</div>
-        </div>
-
-        <div className="kpi-card">
-          <div className="kpi-title">Demand Surges (Spikes)</div>
-          <div className="kpi-value" style={{ color: 'var(--accent-amber)' }}>
-            {spikeCount.toLocaleString()} <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>events</span>
-          </div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Unforecasted consumer demand bursts</div>
-        </div>
-
-        <div className="kpi-card">
-          <div className="kpi-title">Abnormal Drops / Stockouts</div>
-          <div className="kpi-value" style={{ color: 'var(--accent-rose)' }}>
-            {dropCount.toLocaleString()} <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>events</span>
-          </div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Potential inventory depletion</div>
-        </div>
-
-        <div className="kpi-card">
-          <div className="kpi-title">Active Critical Alerts</div>
-          <div className="kpi-value" style={{ color: '#ec4899' }}>{criticalCount.toLocaleString()}</div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>High priority intervention needed</div>
-        </div>
-      </div>
-
-      {/* Distribution Chart & Filters Card */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '1.5rem', marginBottom: '1.5rem' }}>
-        {/* Anomaly Distribution Chart */}
-        <div className="card" style={{ padding: '1.5rem' }}>
-          <h3 style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <BarChart2 size={18} color="var(--accent-primary)" />
-            Anomaly Classification Breakdown
-          </h3>
-          <div style={{ height: 200, width: '100%' }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{ top: 10, right: 10, left: -15, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" />
-                <XAxis dataKey="name" stroke="var(--text-muted)" fontSize={11} tickLine={false} />
-                <YAxis stroke="var(--text-muted)" fontSize={11} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#1f2937',
-                    borderColor: '#374151',
-                    color: '#fff',
-                    borderRadius: 8,
-                  }}
-                />
-                <Bar dataKey="count" radius={[4, 4, 0, 0]}>
-                  {chartData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        {/* Filter Controls */}
-        <div className="card" style={{ padding: '1.5rem' }}>
-          <h3 style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <Filter size={18} color="var(--accent-primary)" />
-            Alert Filters & Target SKU Search
-          </h3>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            {/* Search SKU */}
-            <div>
-              <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '0.3rem', fontWeight: 600, textTransform: 'uppercase' }}>
-                Search Product SKU
-              </label>
-              <div style={{ position: 'relative' }}>
-                <Search size={15} color="var(--text-muted)" style={{ position: 'absolute', left: '10px', top: '9px' }} />
-                <input
-                  type="text"
-                  placeholder="e.g. 176190 or 19512"
-                  value={searchSKU}
-                  onChange={(e) => setSearchSKU(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '0.45rem 0.5rem 0.45rem 2.2rem',
-                    borderRadius: '6px',
-                    border: '1px solid var(--border-strong)',
-                    backgroundColor: 'var(--bg-surface-elevated)',
-                    color: '#fff',
-                    fontSize: '0.85rem',
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* Severity Pill Selector */}
-            <div>
-              <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '0.3rem', fontWeight: 600, textTransform: 'uppercase' }}>
-                Alert Severity
-              </label>
-              <div style={{ display: 'flex', gap: '0.4rem' }}>
-                {['ALL', 'CRITICAL', 'MEDIUM', 'LOW'].map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => setSeverityFilter(s)}
-                    style={{
-                      flex: 1,
-                      padding: '0.4rem 0',
-                      borderRadius: '6px',
-                      border: severityFilter === s ? '1px solid var(--accent-primary)' : '1px solid var(--border-strong)',
-                      backgroundColor: severityFilter === s ? 'rgba(59, 130, 246, 0.25)' : 'var(--bg-surface-elevated)',
-                      color: severityFilter === s ? '#93c5fd' : 'var(--text-secondary)',
-                      fontSize: '0.78rem',
-                      fontWeight: severityFilter === s ? 600 : 500,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Anomaly Type Pill Selector */}
-            <div>
-              <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '0.3rem', fontWeight: 600, textTransform: 'uppercase' }}>
-                Event Type
-              </label>
-              <div style={{ display: 'flex', gap: '0.4rem' }}>
-                {[
-                  { id: 'ALL', label: 'All Types' },
-                  { id: 'SPIKE_DEMAND', label: 'Spike Demand' },
-                  { id: 'DROP_STOCKOUT', label: 'Drop / Stockout' },
-                ].map((t) => (
-                  <button
-                    key={t.id}
-                    onClick={() => setTypeFilter(t.id)}
-                    style={{
-                      flex: 1,
-                      padding: '0.4rem 0',
-                      borderRadius: '6px',
-                      border: typeFilter === t.id ? '1px solid var(--accent-cyan)' : '1px solid var(--border-strong)',
-                      backgroundColor: typeFilter === t.id ? 'rgba(6, 182, 212, 0.25)' : 'var(--bg-surface-elevated)',
-                      color: typeFilter === t.id ? '#67e8f9' : 'var(--text-secondary)',
-                      fontSize: '0.78rem',
-                      fontWeight: typeFilter === t.id ? 600 : 500,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Live Alerts Feed Table */}
-      <div className="card" style={{ padding: '1.5rem' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
-          <div>
-            <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-              Detected Demand Outliers & Business Alerts
-            </h3>
-            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-              Holdout window comparisons between actual units and ML expectation models.
-            </p>
-          </div>
-          <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-            Showing {filteredAlerts.length} alerts
-          </div>
-        </div>
-
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                <th style={{ padding: '0.75rem', textAlign: 'left', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Date</th>
-                <th style={{ padding: '0.75rem', textAlign: 'left', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>SKU & Hub</th>
-                <th style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Actual</th>
-                <th style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Expected</th>
-                <th style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Variance</th>
-                <th style={{ padding: '0.75rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Type</th>
-                <th style={{ padding: '0.75rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Severity</th>
-                <th style={{ padding: '0.75rem', textAlign: 'left', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>Recommended Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredAlerts.slice(0, 50).map((row, idx) => {
-                const isSpike = row.anomaly_type === 'SPIKE_DEMAND';
-                const variancePct = row.expected_demand
-                  ? Math.round(((row.actual_demand - row.expected_demand) / row.expected_demand) * 100)
-                  : 0;
-
-                return (
-                  <tr
-                    key={`${row.product_id}-${row.date_}-${idx}`}
-                    style={{
-                      borderBottom: '1px solid var(--border-subtle)',
-                      backgroundColor: idx % 2 === 0 ? 'transparent' : 'rgba(255, 255, 255, 0.01)',
-                    }}
-                  >
-                    <td style={{ padding: '0.75rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                      {row.date_}
-                    </td>
-                    <td style={{ padding: '0.75rem' }}>
-                      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>#{row.product_id}</div>
-                      <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>{row.city_name}</div>
-                    </td>
-                    <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 600, color: '#fff' }}>
-                      {Math.round(row.actual_demand).toLocaleString()}
-                    </td>
-                    <td style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)' }}>
-                      {Math.round(row.expected_demand).toLocaleString()}
-                    </td>
-                    <td style={{ padding: '0.75rem', textAlign: 'right' }}>
-                      <span
-                        style={{
-                          fontWeight: 700,
-                          fontSize: '0.8rem',
-                          color: isSpike ? 'var(--accent-amber)' : 'var(--accent-rose)',
-                        }}
-                      >
-                        {variancePct > 0 ? `+${variancePct}%` : `${variancePct}%`}
-                      </span>
-                    </td>
-                    <td style={{ padding: '0.75rem', textAlign: 'center' }}>
-                      <span
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '0.25rem',
-                          padding: '0.2rem 0.55rem',
-                          borderRadius: '4px',
-                          fontSize: '0.75rem',
-                          fontWeight: 600,
-                          backgroundColor: isSpike ? 'rgba(245, 158, 11, 0.15)' : 'rgba(244, 63, 94, 0.15)',
-                          color: isSpike ? 'var(--accent-amber)' : 'var(--accent-rose)',
-                        }}
-                      >
-                        {isSpike ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
-                        {isSpike ? 'Spike' : 'Drop'}
-                      </span>
-                    </td>
-                    <td style={{ padding: '0.75rem', textAlign: 'center' }}>
-                      <span
-                        style={{
-                          padding: '0.2rem 0.55rem',
-                          borderRadius: '4px',
-                          fontSize: '0.725rem',
-                          fontWeight: 700,
-                          backgroundColor:
-                            row.severity === 'CRITICAL'
-                              ? 'rgba(236, 72, 153, 0.2)'
-                              : row.severity === 'MEDIUM'
-                              ? 'rgba(59, 130, 246, 0.2)'
-                              : 'rgba(107, 114, 128, 0.2)',
-                          color:
-                            row.severity === 'CRITICAL'
-                              ? '#f472b6'
-                              : row.severity === 'MEDIUM'
-                              ? '#60a5fa'
-                              : '#9ca3af',
-                        }}
-                      >
-                        {row.severity}
-                      </span>
-                    </td>
-                    <td style={{ padding: '0.75rem', color: 'var(--text-secondary)', fontSize: '0.825rem' }}>
-                      {row.action_recommendation}
-                    </td>
+          {filteredAlerts.length === 0 && !loading ? (
+            <EmptyState
+              icon={Activity}
+              title="No alerts found"
+              description="No unusual activity was detected for the selected filters."
+            />
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border-subtle)', backgroundColor: 'var(--bg-surface-subtle)' }}>
+                    <th style={thStyle}>Date</th>
+                    <th style={thStyle}>Product & City</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>Actual</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>Expected</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>Difference</th>
+                    <th style={{ ...thStyle, textAlign: 'center' }}>Type</th>
+                    <th style={{ ...thStyle, textAlign: 'center' }}>Severity</th>
+                    <th style={thStyle}>Suggested Action</th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                </thead>
+                <tbody>
+                  {filteredAlerts.slice(0, 50).map((row, idx) => {
+                    const isSpike = row.anomaly_type === 'SPIKE_DEMAND';
+                    const variancePct = row.expected_demand
+                      ? Math.round(((row.actual_demand - row.expected_demand) / row.expected_demand) * 100)
+                      : 0;
 
-          {filteredAlerts.length === 0 && !loading && (
-            <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
-              No anomalies found for the selected filters.
+                    const severityVariant = row.severity === 'CRITICAL' ? 'critical'
+                      : row.severity === 'MEDIUM' ? 'warning' : 'neutral';
+
+                    return (
+                      <tr
+                        key={`${row.product_id}-${row.date_}-${idx}`}
+                        style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-surface-subtle)'}
+                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#ffffff'}
+                      >
+                        <td style={tdStyle}>{row.date_}</td>
+                        <td style={tdStyle}>
+                          <div style={{ fontWeight: 600 }}>#{row.product_id}</div>
+                          <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{row.city_name}</div>
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'right', fontWeight: 600 }} className="tabular-nums">
+                          {Math.round(row.actual_demand).toLocaleString('en-IN')}
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'right', color: 'var(--text-muted)' }} className="tabular-nums">
+                          {Math.round(row.expected_demand).toLocaleString('en-IN')}
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }} className="tabular-nums">
+                          <span style={{
+                            fontWeight: 700, fontSize: '12px',
+                            color: isSpike ? 'var(--status-warning-text)' : 'var(--status-critical-text)',
+                          }}>
+                            {variancePct > 0 ? `+${variancePct}%` : `${variancePct}%`}
+                          </span>
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'center' }}>
+                          <StatusBadge
+                            variant={isSpike ? 'warning' : 'critical'}
+                            icon={isSpike ? TrendingUp : TrendingDown}
+                            label={isSpike ? 'Spike' : 'Drop'}
+                            size="sm"
+                          />
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'center' }}>
+                          <StatusBadge variant={severityVariant} label={row.severity} size="sm" />
+                        </td>
+                        <td style={{ ...tdStyle, fontSize: '12px', color: 'var(--text-secondary)' }}>
+                          {row.action_recommendation || '—'}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
-        </div>
+        </Card>
       </div>
-    </div>
+    </PageShell>
   );
 }
+
+const thStyle = {
+  padding: '10px 14px',
+  fontSize: '11px',
+  fontWeight: 600,
+  textTransform: 'uppercase',
+  letterSpacing: '0.05em',
+  color: 'var(--text-muted)',
+  textAlign: 'left',
+  whiteSpace: 'nowrap',
+};
+
+const tdStyle = {
+  padding: '11px 14px',
+  verticalAlign: 'middle',
+  color: 'var(--text-primary)',
+};
+
+const labelStyle = {
+  display: 'block',
+  fontSize: '11px',
+  fontWeight: 600,
+  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
+  color: 'var(--text-muted)',
+  marginBottom: '4px',
+};
