@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, String, Integer, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, BigInteger, String, Integer, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from backend.db.session import Base
@@ -18,6 +18,8 @@ class Product(Base):
     l0_category_id = Column(Integer, nullable=True)
     l1_category_id = Column(Integer, nullable=True)
     l2_category_id = Column(Integer, nullable=True)
+    shelf_life_days = Column(Integer, nullable=True, default=180)
+    storage_footprint = Column(Float, nullable=True, default=1.0)
     is_active = Column(Boolean, default=True, nullable=False)
     is_provisional = Column(Boolean, default=False, nullable=False)
     source_upload_job_id = Column(Integer, ForeignKey("upload_jobs.id", ondelete="SET NULL"), nullable=True)

@@ -17,7 +17,12 @@ class Dataset(Base):
     date_min = Column(Date, nullable=True)
     date_max = Column(Date, nullable=True)
 
-    user = relationship("User", backref="datasets")
+    is_default_upload_target = Column(Boolean, nullable=False, default=False, index=True)
+    status = Column(String(50), nullable=False, default="active")  # 'active', 'merged', 'archived'
+
+    # NOTE: Per-user active_dataset_id needs to come before shipping to real multiple users.
+    # is_default_upload_target serves as system default upload target.
+    user = relationship("User", foreign_keys=[user_id], backref="datasets")
     sales_transactions = relationship("SalesTransaction", back_populates="dataset", cascade="all, delete-orphan")
     daily_demands = relationship("DailyProductDemand", back_populates="dataset", cascade="all, delete-orphan")
     forecast_runs = relationship("ForecastRun", back_populates="dataset", cascade="all, delete-orphan")

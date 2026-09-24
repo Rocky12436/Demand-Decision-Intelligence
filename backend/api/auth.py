@@ -11,9 +11,16 @@ from sqlalchemy.orm import Session
 
 from backend.db.session import get_db
 from backend.models.user import User, Role
-from backend.schemas.auth import Token, UserRegister, UserResponse, LoginRequest
-from backend.core.security import verify_password, get_password_hash, create_access_token
+from backend.schemas.auth import Token, UserRegister, UserResponse, LoginRequest, RefreshTokenRequest
+from backend.core.security import (
+    verify_password,
+    get_password_hash,
+    create_access_token,
+    create_refresh_token,
+    decode_refresh_token,
+)
 from backend.core.deps import get_current_user
+from backend.core.rate_limit import rate_limit_login
 
 router = APIRouter()
 
@@ -30,35 +37,32 @@ router = APIRouter()
 )
 def register(payload: UserRegister, db: Session = Depends(get_db)):
     """
-    Create a new user with a bcrypt-hashed password.
-    Assigns the default 'viewer' role (role_id=3).
+    Create a new user account.
+    Assigns the default 'viewer' role (id=3).
     """
-    # Check uniqueness
-    if db.query(User).filter(User.email == payload.email).first():
+    existing_email = db.query(User).filter(User.email == payload.email).first()
+    if existing_email:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists.",
-        )
-    if db.query(User).filter(User.username == payload.username).first():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Username is already taken.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An account with this email address already exists.",
         )
 
-    # Ensure the default viewer role exists
+    existing_user = db.query(User).filter(User.username == payload.username).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An account with this username already exists.",
+        )
+
     viewer_role = db.query(Role).filter(Role.name == "viewer").first()
-    if not viewer_role:
-        viewer_role = Role(name="viewer", description="Read-only analyst viewer")
-        db.add(viewer_role)
-        db.commit()
-        db.refresh(viewer_role)
+    role_id = viewer_role.id if viewer_role else 3
 
     new_user = User(
         email=payload.email,
         username=payload.username,
         hashed_password=get_password_hash(payload.password),
         full_name=payload.full_name,
-        role_id=viewer_role.id,
+        role_id=role_id,
         is_active=True,
     )
     db.add(new_user)
@@ -77,10 +81,15 @@ def register(payload: UserRegister, db: Session = Depends(get_db)):
     response_model=Token,
     summary="Authenticate and receive a JWT access token",
 )
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+def login(
+    payload: LoginRequest,
+    db: Session = Depends(get_db),
+    _rate_limit: None = Depends(rate_limit_login),
+):
     """
     Accept email **or** username + password.
-    Returns a signed JWT on success.
+    Returns a signed JWT access token and refresh token on success.
+    Enforces rate limit of 5 attempts/minute per IP.
     """
     # Try email first, then username
     user = db.query(User).filter(User.email == payload.username).first()
@@ -100,8 +109,54 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
             detail="Your account has been deactivated. Contact an administrator.",
         )
 
-    token = create_access_token(subject=user.email)
-    return {"access_token": token, "token_type": "bearer"}
+    role_name = user.role.name if user.role else "viewer"
+    access_token = create_access_token(subject=user.email, role=role_name)
+    refresh_token = create_refresh_token(subject=user.email)
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "refresh_token": refresh_token,
+    }
+
+
+# ──────────────────────────────────────────────
+# POST /api/auth/refresh
+# ──────────────────────────────────────────────
+
+@router.post(
+    "/refresh",
+    response_model=Token,
+    summary="Exchange a refresh token for a new access token",
+)
+def refresh_token_endpoint(
+    payload: RefreshTokenRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Validates a long-lived refresh token and returns a fresh short-lived access token.
+    """
+    subject = decode_refresh_token(payload.refresh_token)
+    if not subject:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = db.query(User).filter((User.email == subject) | (User.username == subject)).first()
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+        )
+
+    role_name = user.role.name if user.role else "viewer"
+    access_token = create_access_token(subject=user.email, role=role_name)
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "refresh_token": payload.refresh_token,
+    }
 
 
 # ──────────────────────────────────────────────
@@ -129,8 +184,14 @@ def login_oauth2(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = create_access_token(subject=user.email)
-    return {"access_token": token, "token_type": "bearer"}
+    role_name = user.role.name if user.role else "viewer"
+    access_token = create_access_token(subject=user.email, role=role_name)
+    refresh_token = create_refresh_token(subject=user.email)
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "refresh_token": refresh_token,
+    }
 
 
 # ──────────────────────────────────────────────

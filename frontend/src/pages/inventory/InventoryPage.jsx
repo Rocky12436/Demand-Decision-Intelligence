@@ -3,16 +3,26 @@ import {
   Boxes,
   AlertTriangle,
   CheckCircle2,
-  ShieldCheck,
   RefreshCw,
   Search,
   Sliders,
-  Building2,
-  Package,
-  Layers,
-  ArrowUpDown
+  ArrowUpDown,
+  Loader2,
+  Eye,
+  ShoppingCart,
+  X,
 } from 'lucide-react';
 import api, { recomputeForecast } from '../../services/api';
+import ForwardBuyWidget from './ForwardBuyWidget';
+import SkuExplainabilityModal from '../../components/common/SkuExplainabilityModal';
+import {
+  PageShell,
+  PageHeader,
+  Card,
+  StatCard,
+  StatusBadge,
+  EmptyState,
+} from '../../components/ui';
 
 const Z_SCORES = {
   0.90: 1.282,
@@ -32,6 +42,8 @@ export default function InventoryPage() {
   const [serviceLevel, setServiceLevel] = useState(0.95);
   const [sortField, setSortField] = useState('mean_daily_demand');
   const [sortAsc, setSortAsc] = useState(false);
+  const [selectedForwardBuySku, setSelectedForwardBuySku] = useState(null);
+  const [selectedExplainSku, setSelectedExplainSku] = useState(null);
 
   useEffect(() => {
     loadInventoryData();
@@ -100,22 +112,19 @@ export default function InventoryPage() {
       const rop = Math.ceil(mean * lt + ssKings);
       const tsl = Math.ceil(mean * (lt + 7) + ssKings);
 
-      // Status classification
+      // Status classification with user-friendly labels
       let status = 'HEALTHY';
-      let statusColor = 'var(--accent-emerald)';
-      let badgeBg = 'rgba(16, 185, 129, 0.15)';
-      let actionText = 'Stock Buffer Adequate';
+      let statusVariant = 'success';
+      let actionText = 'Stock level OK';
 
       if (mean > 5000 && std / (mean || 1) > 0.12) {
         status = 'REORDER_NOW';
-        statusColor = 'var(--accent-rose)';
-        badgeBg = 'rgba(244, 63, 94, 0.15)';
-        actionText = 'Trigger Fast Replenishment PO';
+        statusVariant = 'critical';
+        actionText = 'Order now — risk of running out';
       } else if (mean > 3000) {
         status = 'BUFFER_REVIEW';
-        statusColor = 'var(--accent-amber)';
-        badgeBg = 'rgba(245, 158, 11, 0.15)';
-        actionText = 'Review Supplier Lead Times';
+        statusVariant = 'warning';
+        actionText = 'Check supplier delivery times';
       }
 
       return {
@@ -128,8 +137,7 @@ export default function InventoryPage() {
         calculated_rop: rop,
         calculated_tsl: tsl,
         status,
-        statusColor,
-        badgeBg,
+        statusVariant,
         actionText,
       };
     });
@@ -168,345 +176,325 @@ export default function InventoryPage() {
     }
   };
 
+  const SortHeader = ({ field, label, align = 'left' }) => (
+    <th
+      onClick={() => toggleSort(field)}
+      style={{
+        ...thStyle,
+        textAlign: align,
+        cursor: 'pointer',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', justifyContent: align === 'right' ? 'flex-end' : 'flex-start' }}>
+        {label}
+        <ArrowUpDown size={11} style={{ opacity: sortField === field ? 1 : 0.3 }} />
+      </div>
+    </th>
+  );
+
   return (
-    <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '2rem' }}>
-        <div>
-          <h1 style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-            <Boxes color="var(--accent-primary)" size={28} />
-            Inventory Decision Intelligence
-          </h1>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.925rem', marginTop: '0.25rem' }}>
-            Dynamic Safety Stock, Reorder Point (ROP), and Target Stock Level optimization with service level simulation.
-          </p>
+    <PageShell maxWidth="1400px">
+      <PageHeader
+        icon={Boxes}
+        title="Stock & Reorder Planning"
+        subtitle="See how much stock to keep and when to reorder. Adjust delivery time and service level to see changes instantly."
+        actions={
+          <button onClick={loadInventoryData} className="diq-btn diq-btn-secondary" disabled={loading}>
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            {loading ? 'Loading...' : 'Refresh'}
+          </button>
+        }
+      />
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+
+        {/* ── KPI Cards ── */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '12px' }}>
+          <StatCard label="Products Tracked" value={totalSKUs.toLocaleString('en-IN')} subtext="In selected city" />
+          <StatCard
+            label="Need Urgent Reorder"
+            value={reorderUrgentCount}
+            subtext="High risk of stockout"
+            style={reorderUrgentCount > 0 ? { borderColor: 'var(--status-critical-border)' } : {}}
+          />
+          <StatCard
+            label="Avg. Safety Stock"
+            value={`${avgSafetyStock.toLocaleString('en-IN')} units`}
+            subtext={`Protecting ${Math.round(serviceLevel * 100)}% service`}
+          />
+          <StatCard
+            label="Delivery Time"
+            value={`${leadTimeDays} days`}
+            subtext="From supplier to warehouse"
+          />
         </div>
 
-        <button
-          className="btn btn-primary"
-          onClick={loadInventoryData}
-          disabled={loading}
-          style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 1.4rem' }}
-        >
-          <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
-          {loading ? 'Recalculating...' : 'Refresh Engine'}
-        </button>
-      </div>
+        {/* ── Settings & Filters ── */}
+        <Card title="Settings & Filters" icon={Sliders} subtitle="Change these to see how stock levels would change.">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '20px' }}>
 
-      {/* KPI Cards */}
-      <div className="grid-kpi" style={{ marginBottom: '1.5rem' }}>
-        <div className="kpi-card">
-          <div className="kpi-title">Monitored SKUs</div>
-          <div className="kpi-value">{totalSKUs.toLocaleString()}</div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Active catalog products</div>
-        </div>
+            {/* Search */}
+            <div>
+              <label style={labelStyle}>Search Product ID</label>
+              <div style={{ position: 'relative' }}>
+                <Search size={15} style={{ position: 'absolute', left: '10px', top: '9px', color: 'var(--text-muted)' }} />
+                <input
+                  type="text"
+                  placeholder="e.g. 19512"
+                  value={searchSKU}
+                  onChange={(e) => setSearchSKU(e.target.value)}
+                  style={inputStyle}
+                />
+              </div>
+            </div>
 
-        <div className="kpi-card">
-          <div className="kpi-title">Immediate Reorder POs</div>
-          <div className="kpi-value" style={{ color: 'var(--accent-rose)' }}>{reorderUrgentCount}</div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>High stockout vulnerability</div>
-        </div>
+            {/* City filter */}
+            <div>
+              <label style={labelStyle}>City / Warehouse</label>
+              <select
+                value={selectedCity}
+                onChange={(e) => setSelectedCity(e.target.value)}
+                style={selectStyle}
+              >
+                <option value="ALL">All Cities</option>
+                <option value="Delhi">Delhi</option>
+                <option value="Bengaluru">Bengaluru</option>
+                <option value="Mumbai">Mumbai</option>
+                <option value="HR-NCR">HR-NCR</option>
+              </select>
+            </div>
 
-        <div className="kpi-card">
-          <div className="kpi-title">Avg. Safety Buffer</div>
-          <div className="kpi-value" style={{ color: 'var(--accent-cyan)' }}>{avgSafetyStock.toLocaleString()} <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>units</span></div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Protecting {Math.round(serviceLevel * 100)}% cycle service</div>
-        </div>
-
-        <div className="kpi-card">
-          <div className="kpi-title">Configured Lead Time</div>
-          <div className="kpi-value" style={{ color: 'var(--accent-amber)' }}>{leadTimeDays} Days</div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Fulfillment replenishment cycle</div>
-        </div>
-      </div>
-
-      {/* Interactive Simulation & Filter Controls Bar */}
-      <div className="card" style={{ marginBottom: '1.5rem', padding: '1.5rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.25rem' }}>
-          <Sliders size={18} color="var(--accent-primary)" />
-          <h3 style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-            Live Policy Simulation Parameters & Filters
-          </h3>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.5rem' }}>
-          {/* SKU Search */}
-          <div>
-            <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.4rem', fontWeight: 600, textTransform: 'uppercase' }}>
-              Search SKU ID
-            </label>
-            <div style={{ position: 'relative' }}>
-              <Search size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '10px', top: '10px' }} />
+            {/* Lead time slider */}
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                <label style={labelStyle}>Supplier Delivery Time</label>
+                <span style={{ fontSize: '13px', fontWeight: 700, color: 'var(--accent-primary)' }}>{leadTimeDays} days</span>
+              </div>
               <input
-                type="text"
-                placeholder="e.g. 19512"
-                value={searchSKU}
-                onChange={(e) => setSearchSKU(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem 0.5rem 0.5rem 2.2rem',
-                  borderRadius: '6px',
-                  border: '1px solid var(--border-strong)',
-                  backgroundColor: 'var(--bg-surface-elevated)',
-                  color: '#fff',
-                  fontSize: '0.85rem',
-                }}
+                type="range"
+                min="1"
+                max="14"
+                step="1"
+                value={leadTimeDays}
+                onChange={(e) => setLeadTimeDays(Number(e.target.value))}
+                style={{ width: '100%', accentColor: 'var(--accent-primary)', cursor: 'pointer' }}
               />
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-muted)' }}>
+                <span>1 day</span>
+                <span>14 days</span>
+              </div>
+            </div>
+
+            {/* Service level */}
+            <div>
+              <label style={labelStyle}>Service Level (how often you want to be in stock)</label>
+              <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
+                {[0.90, 0.95, 0.98, 0.99].map((lvl) => (
+                  <button
+                    key={lvl}
+                    onClick={() => setServiceLevel(lvl)}
+                    className={serviceLevel === lvl ? 'diq-btn diq-btn-primary diq-btn-sm' : 'diq-btn diq-btn-secondary diq-btn-sm'}
+                    style={{ flex: 1 }}
+                  >
+                    {Math.round(lvl * 100)}%
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
+        </Card>
 
-          {/* City Filter */}
-          <div>
-            <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.4rem', fontWeight: 600, textTransform: 'uppercase' }}>
-              Fulfillment Hub
-            </label>
-            <select
-              value={selectedCity}
-              onChange={(e) => setSelectedCity(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '0.5rem 0.75rem',
-                borderRadius: '6px',
-                border: '1px solid var(--border-strong)',
-                backgroundColor: 'var(--bg-surface-elevated)',
-                color: '#fff',
-                fontSize: '0.85rem',
-              }}
-            >
-              <option value="ALL">All Hubs (Bengaluru, Delhi, Mumbai, HR-NCR)</option>
-              <option value="Delhi">Delhi Hub</option>
-              <option value="Bengaluru">Bengaluru Hub</option>
-              <option value="Mumbai">Mumbai Hub</option>
-              <option value="HR-NCR">HR-NCR Hub</option>
-            </select>
-          </div>
-
-          {/* Lead Time Slider */}
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
-              <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 600, textTransform: 'uppercase' }}>
-                Supplier Lead Time
-              </label>
-              <span style={{ fontSize: '0.85rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>
-                {leadTimeDays} Days
-              </span>
-            </div>
-            <input
-              type="range"
-              min="1"
-              max="14"
-              step="1"
-              value={leadTimeDays}
-              onChange={(e) => setLeadTimeDays(Number(e.target.value))}
-              style={{ width: '100%', accentColor: 'var(--accent-primary)', cursor: 'pointer' }}
-            />
-          </div>
-
-          {/* Service Level Pills */}
-          <div>
-            <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.4rem', fontWeight: 600, textTransform: 'uppercase' }}>
-              Target Cycle Service Level (CSL)
-            </label>
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
-              {[0.90, 0.95, 0.98, 0.99].map((lvl) => (
-                <button
-                  key={lvl}
-                  onClick={() => setServiceLevel(lvl)}
-                  style={{
-                    flex: 1,
-                    padding: '0.45rem 0',
-                    borderRadius: '6px',
-                    border: serviceLevel === lvl ? '1px solid var(--accent-primary)' : '1px solid var(--border-strong)',
-                    backgroundColor: serviceLevel === lvl ? 'rgba(59, 130, 246, 0.2)' : 'var(--bg-surface-elevated)',
-                    color: serviceLevel === lvl ? '#93c5fd' : 'var(--text-secondary)',
-                    fontWeight: serviceLevel === lvl ? 600 : 500,
-                    fontSize: '0.8rem',
-                    cursor: 'pointer',
-                  }}
-                >
-                  {Math.round(lvl * 100)}%
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Detailed Recommendations Data Table */}
-      <div className="card" style={{ padding: '1.5rem' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
-          <div>
-            <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-              Optimized Inventory Policies Table
-            </h3>
-            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-              Dynamic calculations: ROP = (Mean Demand × Lead Time) + Safety Stock
-            </p>
-          </div>
-          <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-            Showing {filteredData.length} records
-          </div>
-        </div>
-
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                <th
-                  onClick={() => toggleSort('product_id')}
-                  style={{ padding: '0.75rem', textAlign: 'left', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                    SKU ID <ArrowUpDown size={12} />
-                  </div>
-                </th>
-                <th
-                  onClick={() => toggleSort('city_name')}
-                  style={{ padding: '0.75rem', textAlign: 'left', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                    Hub <ArrowUpDown size={12} />
-                  </div>
-                </th>
-                <th
-                  onClick={() => toggleSort('mean_daily_demand')}
-                  style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.3rem' }}>
-                    Daily Demand (μ) <ArrowUpDown size={12} />
-                  </div>
-                </th>
-                <th
-                  onClick={() => toggleSort('calculated_ss')}
-                  style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.3rem' }}>
-                    King's SS (Δ vs Classical) <ArrowUpDown size={12} />
-                  </div>
-                </th>
-                <th
-                  onClick={() => toggleSort('calculated_rop')}
-                  style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.3rem' }}>
-                    Reorder Point (ROP) <ArrowUpDown size={12} />
-                  </div>
-                </th>
-                <th
-                  onClick={() => toggleSort('calculated_tsl')}
-                  style={{ padding: '0.75rem', textAlign: 'right', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.78rem', textTransform: 'uppercase' }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.3rem' }}>
-                    Target Stock (TSL) <ArrowUpDown size={12} />
-                  </div>
-                </th>
-                <th style={{ padding: '0.75rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.78rem', textTransform: 'uppercase' }}>
-                  Action Recommendation
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredData.slice(0, 100).map((row, idx) => (
-                <tr
-                  key={`${row.product_id}-${row.city_name}-${idx}`}
-                  style={{
-                    borderBottom: '1px solid var(--border-subtle)',
-                    backgroundColor: idx % 2 === 0 ? 'transparent' : 'rgba(255, 255, 255, 0.01)',
-                  }}
-                >
-                  <td style={{ padding: '0.75rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                      <span>#{row.product_id}</span>
-                      <span
-                        title={`Lead time confidence: ${row.lead_time_confidence}`}
-                        style={{
-                          fontSize: '0.65rem',
-                          fontWeight: 700,
-                          padding: '0.1rem 0.35rem',
-                          borderRadius: '4px',
-                          backgroundColor: row.lead_time_confidence === 'HIGH' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)',
-                          color: row.lead_time_confidence === 'HIGH' ? 'var(--accent-emerald)' : 'var(--accent-amber)',
-                        }}
-                      >
-                        LT: {row.lead_time_confidence}
-                      </span>
-                    </div>
-                  </td>
-                  <td style={{ padding: '0.75rem', color: 'var(--text-secondary)' }}>
-                    {row.city_name}
-                  </td>
-                  <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 500, color: 'var(--text-primary)' }}>
-                    {Math.round(row.mean_daily_demand).toLocaleString()}
-                  </td>
-                  <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 600 }}>
-                    <div style={{ color: 'var(--accent-cyan)' }}>{row.calculated_ss.toLocaleString()}</div>
-                    {row.ss_delta != null && row.ss_delta !== 0 && (
-                      <div style={{ fontSize: '0.72rem', color: row.ss_delta > 0 ? '#fbbf24' : '#94a3b8', marginTop: '2px' }}>
-                        {row.ss_delta > 0 ? `+${row.ss_delta.toLocaleString()}` : row.ss_delta.toLocaleString()} vs classical
-                      </div>
-                    )}
-                  </td>
-                  <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 700, color: 'var(--accent-amber)' }}>
-                    {row.calculated_rop.toLocaleString()}
-                  </td>
-                  <td style={{ padding: '0.75rem', textAlign: 'right', fontWeight: 500, color: 'var(--text-primary)' }}>
-                    {row.calculated_tsl.toLocaleString()}
-                  </td>
-                  <td style={{ padding: '0.75rem', textAlign: 'center' }}>
-                    <span
-                      style={{
-                        padding: '0.25rem 0.65rem',
-                        borderRadius: '6px',
-                        fontSize: '0.75rem',
-                        fontWeight: 600,
-                        backgroundColor: row.badgeBg,
-                        color: row.statusColor,
-                        display: 'inline-block',
-                      }}
-                    >
-                      {row.actionText}
-                    </span>
-                  </td>
+        {/* ── Main Data Table ── */}
+        <Card
+          title="Stock Levels & Reorder Points"
+          subtitle="All numbers update live when you change settings above."
+          actions={
+            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+              Showing {filteredData.length} products
+            </span>
+          }
+        >
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border-subtle)', backgroundColor: 'var(--bg-surface-subtle)' }}>
+                  <SortHeader field="product_id" label="Product ID" />
+                  <SortHeader field="city_name" label="City" />
+                  <SortHeader field="mean_daily_demand" label="Daily Demand" align="right" />
+                  <SortHeader field="calculated_ss" label="Safety Stock" align="right" />
+                  <SortHeader field="calculated_rop" label="Reorder At" align="right" />
+                  <SortHeader field="calculated_tsl" label="Target Stock" align="right" />
+                  <th style={{ ...thStyle, textAlign: 'center' }}>Status</th>
+                  <th style={{ ...thStyle, textAlign: 'center' }}>Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {filteredData.length === 0 && !loading && (
-            <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
-              No inventory records match the selected filter.
-            </div>
-          )}
-        </div>
-
-        {/* Freshness & Staleness Metadata Caption */}
-        <div style={{ marginTop: '1.25rem', paddingTop: '0.85rem', borderTop: '1px solid var(--border-subtle)', display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-          <div>
-            Computed {freshness?.computed_at ? new Date(freshness.computed_at).toISOString().replace('T', ' ').slice(0, 16) : new Date().toISOString().slice(0, 16)} from data through {freshness?.data_through || 'latest'} (model: {freshness?.model_name || 'EOQ_SafetyStock_95'})
-            {' · '}
-            <button
-              onClick={handleRecomputeNow}
-              disabled={recomputing}
-              style={{ background: 'none', border: 'none', color: 'var(--accent-primary)', cursor: 'pointer', textDecoration: 'underline', padding: 0, fontSize: '0.82rem' }}
-            >
-              [Recompute now]
-            </button>
+              </thead>
+              <tbody>
+                {filteredData.length === 0 && !loading ? (
+                  <tr>
+                    <td colSpan="8" style={{ padding: '40px 16px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                      No products match your filters.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredData.slice(0, 100).map((row, idx) => (
+                    <tr
+                      key={`${row.product_id}-${row.city_name}-${idx}`}
+                      style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                      onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-surface-subtle)'}
+                      onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#ffffff'}
+                    >
+                      <td style={tdStyle}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{ fontWeight: 600 }}>#{row.product_id}</span>
+                          <StatusBadge
+                            variant={row.lead_time_confidence === 'HIGH' ? 'success' : 'warning'}
+                            label={row.lead_time_confidence === 'HIGH' ? 'Reliable' : 'Estimated'}
+                            size="sm"
+                          />
+                        </div>
+                      </td>
+                      <td style={tdStyle}>{row.city_name}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right', fontWeight: 500 }} className="tabular-nums">
+                        {Math.round(row.mean_daily_demand).toLocaleString('en-IN')}
+                      </td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }} className="tabular-nums">
+                        <div style={{ fontWeight: 600, color: 'var(--accent-primary)' }}>
+                          {row.calculated_ss.toLocaleString('en-IN')}
+                        </div>
+                        {row.ss_delta != null && row.ss_delta !== 0 && (
+                          <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '1px' }}>
+                            {row.ss_delta > 0 ? '+' : ''}{row.ss_delta.toLocaleString('en-IN')} vs basic
+                          </div>
+                        )}
+                      </td>
+                      <td style={{ ...tdStyle, textAlign: 'right', fontWeight: 700, color: 'var(--status-warning-text)' }} className="tabular-nums">
+                        {row.calculated_rop.toLocaleString('en-IN')}
+                      </td>
+                      <td style={{ ...tdStyle, textAlign: 'right', fontWeight: 500 }} className="tabular-nums">
+                        {row.calculated_tsl.toLocaleString('en-IN')}
+                      </td>
+                      <td style={{ ...tdStyle, textAlign: 'center' }}>
+                        <StatusBadge variant={row.statusVariant} label={row.actionText} size="sm" />
+                      </td>
+                      <td style={{ ...tdStyle, textAlign: 'center' }}>
+                        <div style={{ display: 'flex', gap: '4px', justifyContent: 'center' }}>
+                          <button
+                            onClick={() => setSelectedForwardBuySku(row.product_id)}
+                            className="diq-btn diq-btn-secondary diq-btn-sm"
+                            title="Simulate bulk purchase savings"
+                          >
+                            <ShoppingCart size={12} /> Bulk Buy
+                          </button>
+                          <button
+                            onClick={() => setSelectedExplainSku(row.product_id)}
+                            className="diq-btn diq-btn-secondary diq-btn-sm"
+                            title="See how these numbers were calculated"
+                          >
+                            <Eye size={12} /> Why?
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
 
-          {freshness?.is_stale && (
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', padding: '0.3rem 0.75rem', borderRadius: '6px', backgroundColor: 'rgba(245, 158, 11, 0.15)', border: '1px solid var(--accent-amber)', color: 'var(--accent-amber)', fontWeight: 500, fontSize: '0.78rem' }}>
-              <span>⚠ Data has updated since this inventory policy was generated — recompute recommended</span>
+          {/* Freshness / Staleness footer */}
+          <div style={{
+            marginTop: '16px', paddingTop: '12px', borderTop: '1px solid var(--border-subtle)',
+            display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between',
+            gap: '10px', fontSize: '12px', color: 'var(--text-muted)',
+          }}>
+            <div>
+              Last calculated: {freshness?.computed_at ? new Date(freshness.computed_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : 'just now'}
+              {' · '}
               <button
                 onClick={handleRecomputeNow}
                 disabled={recomputing}
-                style={{ backgroundColor: 'var(--accent-amber)', color: '#000', border: 'none', borderRadius: '4px', padding: '0.2rem 0.5rem', fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer' }}
+                style={{ background: 'none', border: 'none', color: 'var(--accent-primary)', cursor: 'pointer', textDecoration: 'underline', padding: 0, fontSize: '12px', fontWeight: 500 }}
               >
-                Recompute
+                {recomputing ? 'Recalculating...' : 'Recalculate now'}
               </button>
             </div>
-          )}
-        </div>
+
+            {freshness?.is_stale && (
+              <StatusBadge variant="warning" label="New data available — recalculate recommended" size="sm" />
+            )}
+          </div>
+        </Card>
+
+        {/* ── Forward Buy Simulator ── */}
+        {selectedForwardBuySku && (
+          <Card
+            title={`Bulk Purchase Simulator — Product #${selectedForwardBuySku}`}
+            subtitle="See if buying more at once would save money."
+            actions={
+              <button onClick={() => setSelectedForwardBuySku(null)} className="diq-btn diq-btn-secondary diq-btn-sm">
+                <X size={14} /> Close
+              </button>
+            }
+          >
+            <ForwardBuyWidget productId={selectedForwardBuySku} />
+          </Card>
+        )}
       </div>
-    </div>
+
+      {/* SKU Explainability Trace Modal */}
+      {selectedExplainSku && (
+        <SkuExplainabilityModal
+          productId={selectedExplainSku}
+          onClose={() => setSelectedExplainSku(null)}
+        />
+      )}
+    </PageShell>
   );
 }
+
+// Shared styles
+const thStyle = {
+  padding: '10px 14px',
+  fontSize: '11px',
+  fontWeight: 600,
+  textTransform: 'uppercase',
+  letterSpacing: '0.05em',
+  color: 'var(--text-muted)',
+  whiteSpace: 'nowrap',
+};
+
+const tdStyle = {
+  padding: '11px 14px',
+  verticalAlign: 'middle',
+  color: 'var(--text-primary)',
+};
+
+const labelStyle = {
+  display: 'block',
+  fontSize: '11px',
+  fontWeight: 600,
+  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
+  color: 'var(--text-muted)',
+  marginBottom: '4px',
+};
+
+const inputStyle = {
+  width: '100%',
+  padding: '8px 8px 8px 32px',
+  borderRadius: 'var(--border-radius-md)',
+  border: '1px solid var(--border-strong)',
+  backgroundColor: '#ffffff',
+  color: 'var(--text-primary)',
+  fontSize: '13px',
+};
+
+const selectStyle = {
+  width: '100%',
+  padding: '8px 10px',
+  borderRadius: 'var(--border-radius-md)',
+  border: '1px solid var(--border-strong)',
+  backgroundColor: '#ffffff',
+  color: 'var(--text-primary)',
+  fontSize: '13px',
+};

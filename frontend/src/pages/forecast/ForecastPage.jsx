@@ -25,6 +25,7 @@ import {
   History,
 } from 'lucide-react';
 import api, { recomputeForecast } from '../../services/api';
+import { PageShell, PageHeader, Card, DataTable, Badge, MetricLeaderboardCard } from '../../components/ui';
 
 const HORIZONS = [7, 14, 30];
 const AVAILABLE_MODELS = [
@@ -54,6 +55,8 @@ export default function ForecastPage() {
   const [modelFallbackReason, setModelFallbackReason] = useState(null);
   const [confidenceTier, setConfidenceTier] = useState(null);
   const [effectiveModel, setEffectiveModel] = useState(null);
+  const [chartMode, setChartMode] = useState('fan_chart'); // 'fan_chart' | 'standard'
+  const [qualityScorecard, setQualityScorecard] = useState(null);
 
   // 1. Initial Load: Fetch top products & existing runs
   useEffect(() => {
@@ -71,6 +74,12 @@ export default function ForecastPage() {
         if (!pIds.includes(selectedProduct)) {
           setSelectedProduct(pIds[0]);
         }
+      }
+
+      // Fetch data quality scorecard & gate status
+      const qRes = await api.get('/api/quality/scorecard').catch(() => null);
+      if (qRes?.data) {
+        setQualityScorecard(qRes.data);
       }
 
       // Fetch base forecast freshness & historical warning
@@ -243,29 +252,36 @@ export default function ForecastPage() {
     n == null ? '—' : Number(n).toLocaleString('en-US', { maximumFractionDigits: 1 });
 
   return (
-    <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
+    <PageShell>
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '2rem' }}>
-        <div>
-          <h1 style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-            <TrendingUp color="var(--accent-primary)" size={28} />
-            Demand Forecasting & Evaluation Studio
-          </h1>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.925rem', marginTop: '0.25rem' }}>
-            Chronological multi-horizon predictions with Naive, Moving Average, and Facebook Prophet models.
-          </p>
-        </div>
+      <PageHeader
+        title="Demand Forecasting & Evaluation Studio"
+        subtitle="Chronological multi-horizon predictions with Naive, Moving Average, and Facebook Prophet models."
+        icon={TrendingUp}
+        actions={
+          <>
+            {qualityScorecard && qualityScorecard.status !== 'empty_dataset' && (
+              <Badge
+                variant={qualityScorecard.quality_gate_passed ? 'success' : 'critical'}
+                icon={qualityScorecard.quality_gate_passed ? CheckCircle2 : AlertCircle}
+                size="lg"
+              >
+                Quality Gate: {qualityScorecard.quality_gate_passed ? 'PASSED' : 'FAILED'} ({qualityScorecard.composite_score}/100)
+              </Badge>
+            )}
 
-        <button
-          className="btn btn-primary"
-          onClick={handleTriggerForecast}
-          disabled={runningForecast}
-          style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 1.4rem' }}
-        >
-          <RefreshCw size={16} className={runningForecast ? 'animate-spin' : ''} />
-          {runningForecast ? 'Training Models...' : 'Run Forecast'}
-        </button>
-      </div>
+            <button
+              className="btn btn-primary"
+              onClick={handleTriggerForecast}
+              disabled={runningForecast}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 1.4rem' }}
+            >
+              <RefreshCw size={16} className={runningForecast ? 'animate-spin' : ''} />
+              {runningForecast ? 'Training Models...' : 'Run Forecast'}
+            </button>
+          </>
+        }
+      />
 
       {/* Alerts */}
       {feedbackMsg && (
@@ -413,9 +429,9 @@ export default function ForecastPage() {
             Model Accuracy Leaderboard (Holdout Evaluation Split)
           </h2>
           {bestModel && (
-            <span style={{ fontSize: '0.8rem', padding: '0.25rem 0.75rem', borderRadius: '999px', backgroundColor: 'rgba(16, 185, 129, 0.15)', border: '1px solid var(--accent-emerald)', color: 'var(--accent-emerald)', fontWeight: 600 }}>
+            <Badge variant="success" pill>
               Top Performer: {bestModel.model_name.toUpperCase()} (WAPE {bestModel.evaluation?.wape}%)
-            </span>
+            </Badge>
           )}
         </div>
 
@@ -424,76 +440,26 @@ export default function ForecastPage() {
             const run = comparisonRuns.find((r) => r.model_name === m.id);
             const isWinner = bestModel?.model_name === m.id;
             const isSelected = activeModelTab === m.id;
+            const metrics = run?.evaluation
+              ? [
+                  { label: 'WAPE', value: run.evaluation.wape != null ? `${run.evaluation.wape}%` : '—', color: m.color, isKey: true },
+                  { label: 'MAE', value: fmt(run.evaluation.mae) },
+                  { label: 'RMSE', value: fmt(run.evaluation.rmse) },
+                ]
+              : [];
 
             return (
-              <div
+              <MetricLeaderboardCard
                 key={m.id}
+                title={m.name}
+                tag={m.tag}
+                color={m.color}
+                isWinner={isWinner}
+                isSelected={isSelected}
+                metrics={metrics}
+                emptyMessage='No run found for this configuration. Click "Run Forecast" to train.'
                 onClick={() => setActiveModelTab(m.id)}
-                style={{
-                  backgroundColor: isSelected ? 'var(--bg-surface-elevated)' : 'var(--bg-surface)',
-                  border: isSelected
-                    ? `2px solid ${m.color}`
-                    : isWinner
-                    ? '1px solid var(--accent-emerald)'
-                    : '1px solid var(--border-subtle)',
-                  borderRadius: '12px',
-                  padding: '1.25rem',
-                  cursor: 'pointer',
-                  position: 'relative',
-                  transition: 'all 0.2s ease',
-                }}
-              >
-                {isWinner && (
-                  <span
-                    style={{
-                      position: 'absolute',
-                      top: '0.75rem',
-                      right: '0.75rem',
-                      fontSize: '0.7rem',
-                      fontWeight: 700,
-                      backgroundColor: 'rgba(16, 185, 129, 0.2)',
-                      color: 'var(--accent-emerald)',
-                      padding: '0.15rem 0.5rem',
-                      borderRadius: '4px',
-                    }}
-                  >
-                    BEST ACCURACY
-                  </span>
-                )}
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
-                  <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: m.color }} />
-                  <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text-primary)' }}>{m.name}</span>
-                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>({m.tag})</span>
-                </div>
-
-                {run?.evaluation ? (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.75rem', marginTop: '0.5rem' }}>
-                    <div>
-                      <div style={{ fontSize: '0.725rem', color: 'var(--text-secondary)' }}>WAPE</div>
-                      <div style={{ fontSize: '1.2rem', fontWeight: 700, color: m.color }}>
-                        {run.evaluation.wape != null ? `${run.evaluation.wape}%` : '—'}
-                      </div>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: '0.725rem', color: 'var(--text-secondary)' }}>MAE</div>
-                      <div style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-                        {fmt(run.evaluation.mae)}
-                      </div>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: '0.725rem', color: 'var(--text-secondary)' }}>RMSE</div>
-                      <div style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-                        {fmt(run.evaluation.rmse)}
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontStyle: 'italic', marginTop: '0.5rem' }}>
-                    No run found for this configuration. Click "Run Forecast" to train.
-                  </div>
-                )}
-              </div>
+              />
             );
           })}
         </div>
@@ -505,47 +471,78 @@ export default function ForecastPage() {
           <div>
             <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <Activity size={20} color={AVAILABLE_MODELS.find((m) => m.id === activeModelTab)?.color || '#3b82f6'} />
-              Time Series Prediction Curve & 80% Confidence Interval
+              {chartMode === 'fan_chart' ? 'Probabilistic Fan Chart (Quantile Forecasts)' : 'Time Series Prediction Curve & 80% Confidence Interval'}
             </h3>
             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '0.2rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
               <span>Showing {effectiveModel ? effectiveModel.toUpperCase() : activeModelTab.toUpperCase()} model | Product SKU #{selectedProduct} | {selectedHorizon}-Day Horizon</span>
               {confidenceTier && (
-                <span style={{
-                  fontSize: '0.72rem',
-                  fontWeight: 700,
-                  padding: '0.15rem 0.5rem',
-                  borderRadius: '4px',
-                  backgroundColor: confidenceTier === 'HIGH' ? 'rgba(16, 185, 129, 0.2)' : confidenceTier === 'MEDIUM' ? 'rgba(245, 158, 11, 0.2)' : 'rgba(239, 68, 68, 0.2)',
-                  color: confidenceTier === 'HIGH' ? 'var(--accent-emerald)' : confidenceTier === 'MEDIUM' ? 'var(--accent-amber)' : 'var(--accent-rose)',
-                  border: `1px solid ${confidenceTier === 'HIGH' ? 'var(--accent-emerald)' : confidenceTier === 'MEDIUM' ? 'var(--accent-amber)' : 'var(--accent-rose)'}`
-                }}>
+                <Badge
+                  variant={confidenceTier === 'HIGH' ? 'success' : confidenceTier === 'MEDIUM' ? 'warning' : 'critical'}
+                  size="sm"
+                >
                   Confidence: {confidenceTier}
-                </span>
+                </Badge>
               )}
             </p>
           </div>
 
-          {/* Model toggle pills inside chart header */}
-          <div style={{ display: 'flex', gap: '0.5rem', backgroundColor: 'var(--bg-surface-elevated)', padding: '0.3rem', borderRadius: '8px' }}>
-            {AVAILABLE_MODELS.map((m) => (
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+            {/* Fan Chart Toggle */}
+            <div style={{ display: 'flex', backgroundColor: 'var(--bg-surface-elevated)', padding: '0.25rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
               <button
-                key={m.id}
-                onClick={() => setActiveModelTab(m.id)}
+                onClick={() => setChartMode('fan_chart')}
                 style={{
-                  padding: '0.4rem 0.85rem',
+                  padding: '0.35rem 0.75rem',
                   borderRadius: '6px',
                   border: 'none',
-                  backgroundColor: activeModelTab === m.id ? m.color : 'transparent',
-                  color: activeModelTab === m.id ? '#fff' : 'var(--text-secondary)',
-                  fontWeight: activeModelTab === m.id ? 600 : 500,
-                  fontSize: '0.8rem',
+                  backgroundColor: chartMode === 'fan_chart' ? 'var(--accent-primary)' : 'transparent',
+                  color: chartMode === 'fan_chart' ? '#fff' : 'var(--text-secondary)',
+                  fontWeight: 600,
+                  fontSize: '0.78rem',
                   cursor: 'pointer',
-                  transition: 'all 0.15s ease',
                 }}
               >
-                {m.name}
+                Fan Chart (Quantiles)
               </button>
-            ))}
+              <button
+                onClick={() => setChartMode('standard')}
+                style={{
+                  padding: '0.35rem 0.75rem',
+                  borderRadius: '6px',
+                  border: 'none',
+                  backgroundColor: chartMode === 'standard' ? 'var(--accent-primary)' : 'transparent',
+                  color: chartMode === 'standard' ? '#fff' : 'var(--text-secondary)',
+                  fontWeight: 600,
+                  fontSize: '0.78rem',
+                  cursor: 'pointer',
+                }}
+              >
+                Standard (80% CI)
+              </button>
+            </div>
+
+            {/* Model toggle pills inside chart header */}
+            <div style={{ display: 'flex', gap: '0.5rem', backgroundColor: 'var(--bg-surface-elevated)', padding: '0.3rem', borderRadius: '8px' }}>
+              {AVAILABLE_MODELS.map((m) => (
+                <button
+                  key={m.id}
+                  onClick={() => setActiveModelTab(m.id)}
+                  style={{
+                    padding: '0.4rem 0.85rem',
+                    borderRadius: '6px',
+                    border: 'none',
+                    backgroundColor: activeModelTab === m.id ? m.color : 'transparent',
+                    color: activeModelTab === m.id ? '#fff' : 'var(--text-secondary)',
+                    fontWeight: activeModelTab === m.id ? 600 : 500,
+                    fontSize: '0.8rem',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  {m.name}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -555,12 +552,117 @@ export default function ForecastPage() {
             <RefreshCw size={24} className="animate-spin" style={{ marginRight: '0.5rem' }} />
             Loading prediction points...
           </div>
+        ) : chartMode === 'fan_chart' && activeRunDetail?.fan_chart?.length > 0 ? (
+          <div style={{ width: '100%', height: 380 }}>
+            <ResponsiveContainer>
+              <ComposedChart data={activeRunDetail.fan_chart} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="fan90Gradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.20} />
+                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0.05} />
+                  </linearGradient>
+                  <linearGradient id="fan50Gradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#6366f1" stopOpacity={0.35} />
+                    <stop offset="95%" stopColor="#6366f1" stopOpacity={0.15} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" />
+                <XAxis
+                  dataKey="date"
+                  stroke="var(--text-muted)"
+                  fontSize={12}
+                  tickLine={false}
+                />
+                <YAxis
+                  stroke="var(--text-muted)"
+                  fontSize={12}
+                  tickLine={false}
+                  tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v)}
+                />
+                <Tooltip
+                  content={({ active, payload, label }) => {
+                    if (active && payload && payload.length) {
+                      const d = payload[0]?.payload;
+                      return (
+                        <div
+                          style={{
+                            backgroundColor: 'var(--bg-surface)',
+                            border: '1px solid var(--border-strong)',
+                            borderRadius: '8px',
+                            padding: '0.85rem',
+                            fontSize: '0.85rem',
+                            boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+                          }}
+                        >
+                          <div style={{ fontWeight: 700, color: 'var(--text-primary)', marginBottom: '0.35rem' }}>
+                            {d?.date} (Quantile Fan Projection)
+                          </div>
+                          <div style={{ color: '#60a5fa', fontWeight: 600 }}>
+                            Median (q50): {d?.q50} units | Mean: {d?.mean}
+                          </div>
+                          <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginTop: '0.25rem' }}>
+                            50% Interquartile [q25–q75]: [{d?.q25} – {d?.q75}]
+                          </div>
+                          <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem' }}>
+                            90% Interval [q05–q95]: [{d?.q05} – {d?.q95}]
+                          </div>
+                          <div style={{ color: '#f59e0b', fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                            99th Percentile Spike (q99): {d?.q99} units
+                          </div>
+                        </div>
+                      );
+                    }
+                    return null;
+                  }}
+                />
+                <Legend verticalAlign="top" height={36} />
+
+                {/* Outer 90% Band (q95) */}
+                <Area
+                  type="monotone"
+                  dataKey="q95"
+                  name="90% Upper Band (q95)"
+                  stroke="#3b82f6"
+                  strokeDasharray="2 2"
+                  fill="url(#fan90Gradient)"
+                  isAnimationActive={false}
+                />
+                {/* Inner 50% Band (q75) */}
+                <Area
+                  type="monotone"
+                  dataKey="q75"
+                  name="50% Upper Band (q75)"
+                  stroke="#6366f1"
+                  fill="url(#fan50Gradient)"
+                  isAnimationActive={false}
+                />
+                {/* Median Line */}
+                <Line
+                  type="monotone"
+                  dataKey="q50"
+                  name="Median Demand (q50)"
+                  stroke="#38bdf8"
+                  strokeWidth={2.5}
+                  dot={{ r: 3, fill: '#38bdf8' }}
+                />
+                {/* Lower Bound (q05) */}
+                <Line
+                  type="monotone"
+                  dataKey="q05"
+                  name="90% Lower Band (q05)"
+                  stroke="#64748b"
+                  strokeDasharray="3 3"
+                  strokeWidth={1.5}
+                  dot={false}
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
         ) : chartData.length > 0 ? (
           <div style={{ width: '100%', height: 380 }}>
             <ResponsiveContainer>
               <ComposedChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
                 <defs>
-                  {/* Shaded Confidence Interval Gradient */}
                   <linearGradient id="ciGradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="var(--accent-primary)" stopOpacity={0.25} />
                     <stop offset="95%" stopColor="var(--accent-primary)" stopOpacity={0.03} />
@@ -658,6 +760,48 @@ export default function ForecastPage() {
           </div>
         )}
 
+        {/* Probabilistic Safety Stock & Quantile Calibration Scorecard */}
+        {activeRunDetail?.quantile_safety_stock && (
+          <div style={{ marginTop: '1.5rem', paddingTop: '1.25rem', borderTop: '1px solid var(--border-subtle)', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
+            <div style={{ backgroundColor: 'var(--bg-surface-elevated)', padding: '1rem', borderRadius: '10px', border: '1px solid var(--border-subtle)' }}>
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontWeight: 600, textTransform: 'uppercase' }}>
+                Direct Quantile Safety Stock (95% SL)
+              </div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', marginTop: '0.35rem' }}>
+                <span style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--accent-primary)' }}>
+                  {activeRunDetail.quantile_safety_stock.ss_quantile} units
+                </span>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                  vs King's: {activeRunDetail.quantile_safety_stock.ss_kings} u | Classical: {activeRunDetail.quantile_safety_stock.ss_classical} u
+                </span>
+              </div>
+              <div style={{ fontSize: '0.75rem', color: activeRunDetail.quantile_safety_stock.delta_vs_kings < 0 ? 'var(--accent-emerald)' : 'var(--accent-amber)', marginTop: '0.3rem' }}>
+                Δ vs King's: {activeRunDetail.quantile_safety_stock.delta_vs_kings >= 0 ? '+' : ''}{activeRunDetail.quantile_safety_stock.delta_vs_kings} units (Non-parametric empirical buffer)
+              </div>
+            </div>
+
+            {activeRunDetail?.quantiles_evaluation && (
+              <div style={{ backgroundColor: 'var(--bg-surface-elevated)', padding: '1rem', borderRadius: '10px', border: '1px solid var(--border-subtle)' }}>
+                <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontWeight: 600, textTransform: 'uppercase' }}>
+                  Quantile Calibration & Pinball Loss
+                </div>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', marginTop: '0.35rem' }}>
+                  <span style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--accent-emerald)' }}>
+                    {activeRunDetail.quantiles_evaluation.calibration_coverage_90}%
+                  </span>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    Coverage (Target: 90.0% | Error: {activeRunDetail.quantiles_evaluation.calibration_error}%)
+                  </span>
+                </div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.3rem' }}>
+                  Mean Pinball Loss: {activeRunDetail.quantiles_evaluation.mean_pinball_loss} (Asymmetric quantile penalty)
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+
         {/* Model Sufficiency Fallback Alert Banner */}
         {modelFallbackReason && (
           <div style={{
@@ -713,117 +857,78 @@ export default function ForecastPage() {
       </div>
 
       {/* Runs History Table */}
-      <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
-          <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <History size={18} color="var(--accent-purple)" />
-            Recent Forecast Database Runs
-          </h3>
+      <Card
+        title="Recent Forecast Database Runs"
+        icon={History}
+        iconColor="var(--accent-purple)"
+        actions={
           <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
             {runs.length} runs recorded in database
           </span>
-        </div>
-
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid var(--border-subtle)', textAlign: 'left', color: 'var(--text-secondary)' }}>
-                <th style={{ padding: '0.75rem 1rem' }}>Run ID</th>
-                <th style={{ padding: '0.75rem 1rem' }}>Product SKU</th>
-                <th style={{ padding: '0.75rem 1rem' }}>Model</th>
-                <th style={{ padding: '0.75rem 1rem' }}>Horizon</th>
-                <th style={{ padding: '0.75rem 1rem' }}>Status</th>
-                <th style={{ padding: '0.75rem 1rem' }}>WAPE</th>
-                <th style={{ padding: '0.75rem 1rem' }}>MAE</th>
-                <th style={{ padding: '0.75rem 1rem' }}>RMSE</th>
-                <th style={{ padding: '0.75rem 1rem' }}>Created At</th>
-              </tr>
-            </thead>
-            <tbody>
-              {runs.slice(0, 10).map((r) => {
-                const isSelected = activeRunDetail?.id === r.id;
-                return (
-                  <tr
-                    key={r.id}
-                    onClick={() => {
-                      setSelectedProduct(r.product_id);
-                      setSelectedHorizon(r.horizon_days);
-                      setActiveModelTab(r.model_name);
-                    }}
-                    style={{
-                      borderBottom: '1px solid var(--border-subtle)',
-                      backgroundColor: isSelected ? 'rgba(59, 130, 246, 0.1)' : 'transparent',
-                      cursor: 'pointer',
-                      transition: 'background-color 0.15s ease',
-                    }}
-                  >
-                    <td style={{ padding: '0.75rem 1rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                      #{r.id}
-                    </td>
-                    <td style={{ padding: '0.75rem 1rem', color: 'var(--text-primary)' }}>
-                      SKU #{r.product_id}
-                    </td>
-                    <td style={{ padding: '0.75rem 1rem' }}>
-                      <span
-                        style={{
-                          padding: '0.2rem 0.5rem',
-                          borderRadius: '4px',
-                          fontSize: '0.75rem',
-                          fontWeight: 600,
-                          backgroundColor:
-                            r.model_name === 'prophet'
-                              ? 'rgba(59, 130, 246, 0.15)'
-                              : r.model_name === 'moving_avg'
-                              ? 'rgba(245, 158, 11, 0.15)'
-                              : 'rgba(6, 182, 212, 0.15)',
-                          color:
-                            r.model_name === 'prophet'
-                              ? '#93c5fd'
-                              : r.model_name === 'moving_avg'
-                              ? '#fcd34d'
-                              : '#67e8f9',
-                        }}
-                      >
-                        {r.model_name.toUpperCase()}
-                      </span>
-                    </td>
-                    <td style={{ padding: '0.75rem 1rem', color: 'var(--text-secondary)' }}>
-                      {r.horizon_days} Days
-                    </td>
-                    <td style={{ padding: '0.75rem 1rem' }}>
-                      <span
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '0.35rem',
-                          color: r.status === 'complete' ? 'var(--accent-emerald)' : 'var(--accent-rose)',
-                          fontSize: '0.8rem',
-                          fontWeight: 500,
-                        }}
-                      >
-                        {r.status === 'complete' ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}
-                        {r.status}
-                      </span>
-                    </td>
-                    <td style={{ padding: '0.75rem 1rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                      {r.evaluation?.wape != null ? `${r.evaluation.wape}%` : '—'}
-                    </td>
-                    <td style={{ padding: '0.75rem 1rem', color: 'var(--text-secondary)' }}>
-                      {fmt(r.evaluation?.mae)}
-                    </td>
-                    <td style={{ padding: '0.75rem 1rem', color: 'var(--text-secondary)' }}>
-                      {fmt(r.evaluation?.rmse)}
-                    </td>
-                    <td style={{ padding: '0.75rem 1rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-                      {new Date(r.created_at).toLocaleString()}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
+        }
+      >
+        <DataTable
+          columns={[
+            { key: 'id', title: 'Run ID', render: (val) => <span style={{ fontWeight: 600 }}>#{val}</span> },
+            { key: 'product_id', title: 'Product SKU', render: (val) => `SKU #${val}` },
+            {
+              key: 'model_name',
+              title: 'Model',
+              render: (val) => {
+                const variant = val === 'prophet' ? 'info' : val === 'moving_avg' ? 'warning' : 'cyan';
+                return <Badge variant={variant}>{val.toUpperCase()}</Badge>;
+              },
+            },
+            { key: 'horizon_days', title: 'Horizon', render: (val) => <span style={{ color: 'var(--text-secondary)' }}>{val} Days</span> },
+            {
+              key: 'status',
+              title: 'Status',
+              render: (val) => (
+                <Badge variant={val === 'complete' ? 'success' : 'critical'} icon={val === 'complete' ? CheckCircle2 : AlertCircle}>
+                  {val}
+                </Badge>
+              ),
+            },
+            {
+              key: 'wape',
+              title: 'WAPE',
+              mono: true,
+              render: (_, row) => (
+                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                  {row.evaluation?.wape != null ? `${row.evaluation.wape}%` : '—'}
+                </span>
+              ),
+            },
+            {
+              key: 'mae',
+              title: 'MAE',
+              render: (_, row) => <span style={{ color: 'var(--text-secondary)' }}>{fmt(row.evaluation?.mae)}</span>,
+            },
+            {
+              key: 'rmse',
+              title: 'RMSE',
+              render: (_, row) => <span style={{ color: 'var(--text-secondary)' }}>{fmt(row.evaluation?.rmse)}</span>,
+            },
+            {
+              key: 'created_at',
+              title: 'Created At',
+              render: (val) => (
+                <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                  {new Date(val).toLocaleString()}
+                </span>
+              ),
+            },
+          ]}
+          data={runs.slice(0, 10)}
+          selectedRowId={activeRunDetail?.id}
+          onRowClick={(r) => {
+            setSelectedProduct(r.product_id);
+            setSelectedHorizon(r.horizon_days);
+            setActiveModelTab(r.model_name);
+          }}
+          emptyMessage="No forecast runs recorded yet."
+        />
+      </Card>
+    </PageShell>
   );
 }

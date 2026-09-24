@@ -102,6 +102,15 @@ export function getFailedRowsDownloadUrl(uploadId) {
   return `${API_BASE_URL}/upload/${uploadId}/failed-rows`;
 }
 
+export async function getUploadJobStatus(jobId) {
+  const response = await fetch(`${API_BASE_URL}/upload/${jobId}/status`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || "Failed to fetch upload status");
+  }
+  return data;
+}
+
 export async function recomputeForecast(datasetId = null, productIds = null) {
   const response = await fetch(`${API_BASE_URL}/forecast/recompute`, {
     method: "POST",

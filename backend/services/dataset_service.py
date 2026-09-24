@@ -31,11 +31,15 @@ def resolve_dataset(
     dataset_id: Optional[int] = None
 ) -> Dataset:
     """
-    Resolves the dataset to operate on:
+    Resolves the dataset to operate on in prioritized order (Prompt Fix 2):
     1. Explicitly requested dataset_id (if provided).
-    2. User's most recent active dataset (if user provided).
-    3. Active 'Demo Data' / seed dataset as fallback.
+    2. Caller user's active dataset (if user provided and user.active_dataset_id is set).
+    3. Caller user's most recent active dataset (if user provided and has datasets).
+    4. System active/default upload target (Dataset.is_default_upload_target == True).
+    5. Latest active non-demo/non-seed dataset (Dataset.is_active == True, name != 'Demo Data', source != 'seed').
+    6. Seed/Demo Data dataset fallback (only if genuinely nothing else exists), marked clearly with is_demo=True.
     """
+    # 1. Explicitly requested dataset_id
     if dataset_id is not None:
         dataset = db.query(Dataset).filter(
             Dataset.id == dataset_id,
@@ -43,17 +47,48 @@ def resolve_dataset(
         ).first()
         if not dataset:
             raise HTTPException(status_code=404, detail=f"Dataset with id {dataset_id} not found or inactive.")
+        dataset.is_demo = bool(dataset.name == "Demo Data" or dataset.source == "seed")
         return dataset
 
+    # 2. Caller user's active dataset
     if user is not None and getattr(user, "id", None) is not None:
+        if getattr(user, "active_dataset_id", None):
+            user_active = db.query(Dataset).filter(
+                Dataset.id == user.active_dataset_id,
+                Dataset.is_active == True
+            ).first()
+            if user_active:
+                user_active.is_demo = False
+                return user_active
+
         user_dataset = db.query(Dataset).filter(
             Dataset.user_id == user.id,
             Dataset.is_active == True
         ).order_by(Dataset.id.desc()).first()
         if user_dataset:
+            user_dataset.is_demo = False
             return user_dataset
 
-    # Fallback to seed/Demo Data
+    # 3. System default upload target
+    default_target = db.query(Dataset).filter(
+        Dataset.is_default_upload_target == True,
+        Dataset.is_active == True
+    ).order_by(Dataset.id.desc()).first()
+    if default_target:
+        default_target.is_demo = False
+        return default_target
+
+    # 4. Latest active non-demo dataset with real rows or source != 'seed'
+    real_dataset = db.query(Dataset).filter(
+        Dataset.is_active == True,
+        Dataset.name != "Demo Data",
+        Dataset.source != "seed"
+    ).order_by(Dataset.id.desc()).first()
+    if real_dataset:
+        real_dataset.is_demo = False
+        return real_dataset
+
+    # 5. Fallback only if genuinely nothing else exists: seed/Demo Data
     demo_dataset = db.query(Dataset).filter(
         Dataset.name == "Demo Data",
         Dataset.is_active == True
@@ -66,7 +101,6 @@ def resolve_dataset(
         ).first()
 
     if not demo_dataset:
-        # Create Demo Data if missing
         demo_dataset = Dataset(
             name="Demo Data",
             source="seed",
@@ -77,7 +111,40 @@ def resolve_dataset(
         db.commit()
         db.refresh(demo_dataset)
 
+    demo_dataset.is_demo = True
     return demo_dataset
+
+
+def check_demo_dataset_integrity(db: Session, max_seed_rows: int = 100) -> dict:
+    """
+    Startup and health check warning loudly (log + admin-visible flag)
+    if the default demo dataset (Dataset 1) ever has more than a small seed row count added
+    to it — which indicates something is still accidentally writing to it (Prompt Fix 2.3).
+    """
+    from backend.models.demand import DailyProductDemand
+    demo_ds = db.query(Dataset).filter(Dataset.id == 1).first()
+    if not demo_ds:
+        return {"status": "ok", "warning": None, "demo_dataset_rows": 0, "accidental_write_suspected": False}
+
+    demand_count = db.query(DailyProductDemand).filter(DailyProductDemand.dataset_id == 1).count()
+    if demand_count > max_seed_rows:
+        msg = (
+            f"CRITICAL WARNING: Default Demo Dataset (Dataset 1) contains {demand_count} rows, "
+            f"exceeding expected threshold ({max_seed_rows}). Something is accidentally writing to Dataset 1!"
+        )
+        logger.error(msg)
+        return {
+            "status": "warning",
+            "warning": msg,
+            "demo_dataset_rows": demand_count,
+            "accidental_write_suspected": True,
+        }
+    return {
+        "status": "ok",
+        "warning": None,
+        "demo_dataset_rows": demand_count,
+        "accidental_write_suspected": False,
+    }
 
 
 def install_query_scoping_guard():

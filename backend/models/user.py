@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from backend.db.session import Base
@@ -22,10 +22,14 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(255), nullable=True)
     role_id = Column(Integer, ForeignKey("roles.id", ondelete="RESTRICT"), nullable=False, default=3)
+    approval_limit_value = Column(Float, nullable=False, default=50000.0)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+    active_dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="SET NULL", use_alter=True), nullable=True)
+
     role = relationship("Role", back_populates="users")
     upload_jobs = relationship("UploadJob", back_populates="user")
     chat_sessions = relationship("ChatSession", back_populates="user")
+    active_dataset = relationship("Dataset", foreign_keys=[active_dataset_id])

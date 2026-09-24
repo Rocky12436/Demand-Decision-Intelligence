@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, JSON
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from backend.db.session import Base
@@ -23,6 +23,10 @@ class ChatMessage(Base):
     sender_role = Column(String(20), nullable=False)  # user, assistant
     message = Column(Text, nullable=False)
     retrieved_context = Column(Text, nullable=True)  # JSON string or plain text retrieved context
+    query_template = Column(String(100), nullable=True)
+    template_params = Column(JSON, nullable=True)
+    execution_ms = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     session = relationship("ChatSession", back_populates="messages")
+

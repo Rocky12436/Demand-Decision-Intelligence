@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, ConfigDict
 from typing import Optional
 
 try:
@@ -15,6 +15,11 @@ except ImportError:
 class Token(BaseModel):
     access_token: str
     token_type: str
+    refresh_token: Optional[str] = None
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
 
 
 class TokenPayload(BaseModel):
@@ -62,12 +67,11 @@ class UserRegister(BaseModel):
 # ──────────────────────────────────────────────
 
 class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     email: str
     username: str
     full_name: Optional[str] = None
     role: str          # resolved from relationship
     is_active: bool
-
-    class Config:
-        from_attributes = True

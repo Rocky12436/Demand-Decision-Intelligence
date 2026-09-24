@@ -17,6 +17,11 @@ from backend.models.demand import DailyProductDemand
 from backend.models.forecast import ForecastRun, ForecastItem
 from backend.models.product import Product
 from backend.models.upload import UploadJob
+from backend.services.quantile_forecaster import (
+    compute_quantiles_for_series,
+    evaluate_quantiles_accuracy,
+    compute_quantile_safety_stock,
+)
 
 
 @dataclass
@@ -161,24 +166,57 @@ MIN_OBSERVATIONS_CONFIG = {
 
 def select_model(
     quantities: List[float],
-    requested_model: Optional[str] = None
+    requested_model: Optional[str] = None,
+    db: Optional[Session] = None,
+    dataset_id: Optional[int] = None,
+    quality_gate_passed: Optional[bool] = None,
+    raise_on_gated_ml: bool = False,
 ) -> Tuple[str, Optional[str], str]:
     """
-    Evaluates data sufficiency guards to select a statistically appropriate model.
-    Never fits complex models on too little history.
+    Evaluates data sufficiency guards and quality gate to select a statistically appropriate model (Prompt Fix 5).
+    Never fits complex models on too little history or when dataset quality gate is failed.
     Returns:
         (selected_model_name, fallback_reason, confidence_tier)
-    Confidence Tiers:
-        - HIGH: series easily meets model history requirements (e.g. >= 1.5x minimum threshold)
-        - MEDIUM: series meets minimum history requirement
-        - LOW: series fell below requirement and was downgraded to a simpler fallback
     """
+    # 0. Quality Gate Check (Prompt Fix 5)
+    if quality_gate_passed is None and db is not None and dataset_id is not None:
+        from backend.models.quality import DataQualityScorecard
+        latest_sc = (
+            db.query(DataQualityScorecard)
+            .filter(DataQualityScorecard.dataset_id == dataset_id)
+            .order_by(DataQualityScorecard.created_at.desc(), DataQualityScorecard.id.desc())
+            .first()
+        )
+        if latest_sc is not None:
+            quality_gate_passed = latest_sc.quality_gate_passed
+
     n_obs = len(quantities)
     non_zero = [q for q in quantities if q > 0]
     n_nonzero = len(non_zero)
 
     req = requested_model or "Prophet_MovingAvg_Ensemble"
     fallback_reason = None
+
+    is_ml_candidate = req.lower() in (
+        "prophet", "prophet_weekly", "prophet_yearly", "prophet_movingavg_ensemble",
+        "ridge", "ridge_lagfeatures", "ridge_lag", "croston", "croston_sba"
+    )
+
+    if quality_gate_passed is False:
+        if is_ml_candidate and raise_on_gated_ml:
+            raise ValueError(
+                f"Quality gate failed for dataset {dataset_id}. ML model '{req}' is locked. "
+                "Only heuristic models {Naive, MovingAverage_7D, MovingAverage_30D} are permitted."
+            )
+        gate_msg = f"Dataset quality gate failed. ML model '{req}' locked. Restricted to heuristic models only."
+        if n_obs >= MIN_OBSERVATIONS_CONFIG["MovingAverage_30D"]:
+            return "MovingAverage_30D", gate_msg, "LOW"
+        elif n_obs >= MIN_OBSERVATIONS_CONFIG["MovingAverage_7D"]:
+            return "MovingAverage_7D", gate_msg, "LOW"
+        elif n_obs >= 1:
+            return "Naive", gate_msg, "LOW"
+        else:
+            return "Insufficient", "Zero observations available", "LOW"
 
     # 1. Check if requested model satisfies history requirements
     if req in ("Prophet_Yearly", "prophet_yearly"):
@@ -288,8 +326,13 @@ def compute_or_get_forecast(
     latest_upload_id = get_latest_upload_job_id(db, dataset_id)
     quantities = [float(r.total_quantity or 0.0) for r in records]
 
-    # 3. Model Sufficiency Guard & Fallback Selection
-    effective_model, fallback_reason, confidence_tier = select_model(quantities, model_name)
+    # 3. Model Sufficiency Guard & Fallback Selection (Prompt Fix 5)
+    effective_model, fallback_reason, confidence_tier = select_model(
+        quantities=quantities,
+        requested_model=model_name,
+        db=db,
+        dataset_id=dataset_id,
+    )
 
     # 4. Model retrieval from runtime cache or fit
     cached_entry = GLOBAL_MODEL_REGISTRY.get(dataset_id, str(product_id), effective_as_of, effective_model)
@@ -316,7 +359,25 @@ def compute_or_get_forecast(
     else:
         band_multiplier = 0.30
 
+    # Compute Probabilistic Quantiles (Prompt 5.2)
+    is_intermittent = (effective_model == "Croston_SBA" or (len(quantities) > 0 and len([q for q in quantities if q == 0]) / len(quantities) >= 0.3))
+    sku_quantiles = compute_quantiles_for_series(
+        quantities=quantities,
+        predicted_mean=predicted_mean,
+        std_dev=cached_entry.std_dev,
+        is_intermittent=is_intermittent,
+        horizon_days=horizon_days,
+    )
+    quantiles_eval = evaluate_quantiles_accuracy(quantities, sku_quantiles)
+    quantile_ss = compute_quantile_safety_stock(
+        quantities=quantities,
+        service_level=0.95,
+        lead_time_days=7,
+        is_intermittent=is_intermittent,
+    )
+
     future_points = []
+    fan_chart_series = []
     for d in range(1, horizon_days + 1):
         f_date = effective_as_of + timedelta(days=d)
         if len(quantities) >= 1:
@@ -326,19 +387,38 @@ def compute_or_get_forecast(
             y_lower = None
             y_upper = None
 
-        future_points.append({
+        pt_dict = {
             "date": f_date.isoformat(),
             "predicted_demand": predicted_mean,
             "yhat": predicted_mean,
             "yhat_lower": y_lower,
             "yhat_upper": y_upper,
             "is_future": True,
+            "quantiles": sku_quantiles,
+        }
+        future_points.append(pt_dict)
+
+        fan_chart_series.append({
+            "date": f_date.isoformat(),
+            "mean": predicted_mean,
+            "q05": sku_quantiles.get("q05", 0.0),
+            "q25": sku_quantiles.get("q25", 0.0),
+            "q50": sku_quantiles.get("q50", predicted_mean),
+            "q75": sku_quantiles.get("q75", 0.0),
+            "q90": sku_quantiles.get("q90", 0.0),
+            "q95": sku_quantiles.get("q95", 0.0),
+            "q99": sku_quantiles.get("q99", 0.0),
         })
 
-    # 5. Check existing ForecastRun in DB
+    # 5. Check existing ForecastRun in DB for this product
     latest_run = (
         db.query(ForecastRun)
-        .filter(ForecastRun.dataset_id == dataset_id)
+        .filter(
+            ForecastRun.dataset_id == dataset_id,
+            ForecastRun.product_id == str(product_id),
+            ForecastRun.horizon_days == horizon_days,
+            ForecastRun.model_name == effective_model,
+        )
         .order_by(ForecastRun.created_at.desc())
         .first()
     )
@@ -353,8 +433,20 @@ def compute_or_get_forecast(
     computed_at = datetime.now(timezone.utc)
 
     if needs_db_save:
+        prod = db.query(Product).filter(Product.product_id == str(product_id)).first()
+        if not prod:
+            prod = Product(
+                product_id=str(product_id),
+                product_name=f"Product {product_id}",
+                is_active=True,
+                is_provisional=True,
+            )
+            db.add(prod)
+            db.flush()
+
         new_run = ForecastRun(
             dataset_id=dataset_id,
+            product_id=str(product_id),
             model_name=effective_model,
             horizon_days=horizon_days,
             status="COMPLETED",
@@ -373,17 +465,6 @@ def compute_or_get_forecast(
             latest_run.superseded_by = new_run.id
             latest_run.is_stale = True
 
-        prod = db.query(Product).filter(Product.product_id == str(product_id)).first()
-        if not prod:
-            prod = Product(
-                product_id=str(product_id),
-                product_name=f"Product {product_id}",
-                is_active=True,
-                is_provisional=True,
-            )
-            db.add(prod)
-            db.flush()
-
         for pt in future_points:
             pt_date = date.fromisoformat(pt["date"])
             item = ForecastItem(
@@ -396,6 +477,7 @@ def compute_or_get_forecast(
                 lower_bound=pt["yhat_lower"],
                 upper_bound=pt["yhat_upper"],
                 model_name=effective_model,
+                quantiles=sku_quantiles,
             )
             db.add(item)
 
@@ -433,9 +515,14 @@ def compute_or_get_forecast(
         "confidence_tier": confidence_tier,
         "model_fallback_reason": fallback_reason,
         "forecast": future_points,
+        "quantiles": sku_quantiles,
+        "fan_chart": fan_chart_series,
+        "quantiles_evaluation": quantiles_eval,
+        "quantile_safety_stock": quantile_ss,
         "freshness": freshness,
         "model_metrics": metrics,
     }
+
 
 
 def recompute_all_forecasts_for_dataset(

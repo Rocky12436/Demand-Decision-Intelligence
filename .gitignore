@@ -13,6 +13,9 @@ dataset/cleaned/*.csv
 dataset/processed/
 dataset/*.parquet
 dataset/failed_rows/
+dataset/*.lock
+*.lock
+uploads/
 
 # ===========================
 # Python

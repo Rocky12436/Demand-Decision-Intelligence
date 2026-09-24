@@ -14,9 +14,13 @@ class UploadJob(Base):
     file_hash = Column(String(64), nullable=True, index=True)
     conflict_mode = Column(String(20), nullable=False, default="replace")
     status = Column(String(50), nullable=False, default="PENDING", index=True)  # PENDING, VALIDATING, PROCESSING, COMPLETED, FAILED, PARTIAL, REJECTED, DELETED
+    current_stage = Column(String(50), nullable=True, default="pending")  # pending, parsing, validating, ingesting, aggregating, completed, failed
+    progress_pct = Column(Integer, nullable=False, default=0)
     total_rows = Column(Integer, default=0)
     processed_rows = Column(Integer, default=0)
     error_summary = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    saved_file_path = Column(String(500), nullable=True)
     uploaded_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)

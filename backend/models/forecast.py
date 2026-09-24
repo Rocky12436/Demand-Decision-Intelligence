@@ -1,7 +1,8 @@
-from sqlalchemy import Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey, Text, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey, Text, UniqueConstraint, Index, JSON
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from backend.db.session import Base
+
 
 class ForecastRun(Base):
     __tablename__ = "forecast_runs"
@@ -14,6 +15,9 @@ class ForecastRun(Base):
     is_stale = Column(Boolean, nullable=False, default=False, index=True)
     superseded_by = Column(Integer, ForeignKey("forecast_runs.id", ondelete="SET NULL"), nullable=True)
     source_upload_job_id = Column(Integer, ForeignKey("upload_jobs.id", ondelete="SET NULL"), nullable=True)
+    product_id = Column(String(100), ForeignKey("products.product_id", ondelete="CASCADE"), nullable=True, index=True)
+    is_champion = Column(Boolean, nullable=False, default=False, server_default="false", index=True)
+    promoted_at = Column(DateTime(timezone=True), nullable=True)
     data_date_max = Column(Date, nullable=True)
     start_date = Column(Date, nullable=True)
     end_date = Column(Date, nullable=True)
@@ -39,7 +43,9 @@ class ForecastItem(Base):
     predicted_demand = Column(Float, nullable=False)
     lower_bound = Column(Float, nullable=True)
     upper_bound = Column(Float, nullable=True)
+    quantiles = Column(JSON, nullable=True)  # {"p05": ..., "p25": ..., "p50": ..., "p75": ..., "p90": ..., "p95": ..., "p99": ...}
     model_name = Column(String(100), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     run = relationship("ForecastRun", back_populates="forecast_items")
@@ -67,3 +73,24 @@ class ForecastEvaluation(Base):
     evaluation_date = Column(DateTime(timezone=True), server_default=func.now())
 
     run = relationship("ForecastRun", back_populates="evaluations")
+
+
+class ModelDriftRecord(Base):
+    __tablename__ = "model_drift_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(String(100), ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False, index=True)
+    model_name = Column(String(100), nullable=False)
+    baseline_wape = Column(Float, nullable=False, default=0.0)
+    rolling_wape = Column(Float, nullable=False, default=0.0)
+    wape_drift_pct = Column(Float, nullable=False, default=0.0)  # relative % change in WAPE
+    psi_score = Column(Float, nullable=False, default=0.0)  # Population Stability Index
+    kl_divergence = Column(Float, nullable=False, default=0.0)
+    drift_status = Column(String(50), nullable=False, default="STABLE")  # STABLE, WARNING, DRIFT_DETECTED
+    retrain_flagged = Column(Boolean, nullable=False, default=False)
+    evaluated_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    __table_args__ = (
+        Index("idx_drift_dataset_product", "dataset_id", "product_id"),
+    )
