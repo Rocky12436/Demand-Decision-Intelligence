@@ -681,44 +681,50 @@ export default function UploadPage() {
           ) : (
             <DataTable
               columns={[
-                { key: 'id', label: 'ID', render: (row) => `#${row.id}` },
-                { key: 'filename', label: 'File Name', render: (row) => <strong>{row.filename}</strong> },
+                { key: 'id', title: 'ID', render: (val, row) => `#${row?.id ?? val}` },
+                { key: 'filename', title: 'File Name', render: (val, row) => <strong>{row?.filename ?? val}</strong> },
                 {
                   key: 'status',
-                  label: 'Status',
-                  render: (row) => (
-                    <StatusBadge
-                      variant={
-                        row.status === 'COMPLETED' || row.status === 'SUCCESS' ? 'success' :
-                        row.status === 'PARTIAL' ? 'warning' : 'critical'
-                      }
-                      label={row.status}
-                      size="sm"
-                    />
-                  ),
+                  title: 'Status',
+                  render: (val, row) => {
+                    const st = row?.status ?? val;
+                    return (
+                      <StatusBadge
+                        variant={
+                          st === 'COMPLETED' || st === 'SUCCESS' ? 'success' :
+                          st === 'PARTIAL' ? 'warning' : 'critical'
+                        }
+                        label={st}
+                        size="sm"
+                      />
+                    );
+                  },
                 },
                 {
-                  key: 'rows',
-                  label: 'Rows Ingested',
-                  render: (row) => `${(row.processed_rows || 0).toLocaleString()} / ${(row.total_rows || 0).toLocaleString()}`,
+                  key: 'processed_rows',
+                  title: 'Rows Ingested',
+                  render: (val, row) => `${(row?.processed_rows || 0).toLocaleString()} / ${(row?.total_rows || 0).toLocaleString()}`,
                 },
                 {
-                  key: 'date',
-                  label: 'Date',
-                  render: (row) => row.created_at ? new Date(row.created_at).toLocaleString('en-IN') : 'Recent',
+                  key: 'created_at',
+                  title: 'Date',
+                  render: (val, row) => {
+                    const dateVal = row?.created_at ?? val;
+                    return dateVal ? new Date(dateVal).toLocaleString('en-IN') : 'Recent';
+                  },
                 },
                 {
                   key: 'actions',
-                  label: 'Actions',
-                  render: (row) => (
+                  title: 'Actions',
+                  render: (val, row) => (
                     <button
-                      onClick={() => handleDeleteUpload(row.id)}
-                      disabled={deletingId === row.id}
+                      onClick={() => row?.id && handleDeleteUpload(row.id)}
+                      disabled={deletingId === row?.id}
                       className="diq-btn diq-btn-secondary diq-btn-sm"
                       style={{ padding: '4px 8px', color: 'var(--status-critical-text)' }}
                       title="Delete upload and its data"
                     >
-                      <Trash2 size={12} /> {deletingId === row.id ? 'Deleting...' : 'Delete'}
+                      <Trash2 size={12} /> {deletingId === row?.id ? 'Deleting...' : 'Delete'}
                     </button>
                   ),
                 },
