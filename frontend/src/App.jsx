@@ -54,19 +54,17 @@ export default function App() {
             <Route path="/recommendations" element={<RecommendationsPage />} />
             <Route path="/transfers" element={<TransfersPage />} />
 
-
             <Route path="/trends" element={<TrendsPage />} />
             <Route path="/price-insights" element={<PriceInsightsPage />} />
             <Route path="/market-prices" element={<MarketPricesPage />} />
             <Route path="/evaluation" element={<ForecastPage />} />
 
-            {/* Phase 5 Routes */}
+            {/* Detailed Feature Routes */}
             <Route path="/sku/:productId" element={<SkuDetailPage />} />
             <Route path="/quality" element={<DataQualityScorecardPage />} />
             <Route path="/model-performance" element={<ModelPerformancePage />} />
             <Route path="/procurement" element={<Navigate to="/purchase-orders" replace />} />
             <Route path="/classification" element={<Navigate to="/abc-xyz" replace />} />
-
             <Route path="/assistant" element={<AssistantPage />} />
           </Route>
 

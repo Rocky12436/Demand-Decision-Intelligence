@@ -1,6 +1,7 @@
-import { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import {
   Upload,
+  UploadCloud,
   FileSpreadsheet,
   CheckCircle2,
   AlertTriangle,
@@ -10,6 +11,14 @@ import {
   Loader2,
   RefreshCw,
   Info,
+  Check,
+  X,
+  FileCheck,
+  ArrowRight,
+  ShieldCheck,
+  Calendar,
+  Layers,
+  HelpCircle,
 } from "lucide-react";
 import {
   uploadSalesFile,
@@ -46,6 +55,7 @@ export default function UploadPage() {
   const [allowDuplicate, setAllowDuplicate] = useState(false);
   const [duplicateConflict, setDuplicateConflict] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+  const [dragActive, setDragActive] = useState(false);
 
   const loadUploads = async () => {
     try {
@@ -89,8 +99,7 @@ export default function UploadPage() {
     }
   }, [result]);
 
-  const handleFileChange = (event) => {
-    const selectedFile = event.target.files[0];
+  const handleFile = (selectedFile) => {
     setError("");
     setResult(null);
     setResolveSuccessMsg("");
@@ -101,7 +110,7 @@ export default function UploadPage() {
     }
 
     if (!selectedFile.name.toLowerCase().endsWith(".csv")) {
-      setError("Please select a valid CSV file.");
+      setError("Please select a valid CSV spreadsheet file (.csv).");
       setFile(null);
       return;
     }
@@ -109,9 +118,50 @@ export default function UploadPage() {
     setFile(selectedFile);
   };
 
+  const handleFileChange = (event) => {
+    const selectedFile = event.target.files[0];
+    handleFile(selectedFile);
+  };
+
+  const handleDrag = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  const downloadSampleTemplate = () => {
+    const csvContent =
+      "date_,city_name,order_id,cart_id,dim_customer_key,procured_quantity,unit_selling_price,total_discount_amount,product_id,total_weighted_landing_price\n" +
+      "2026-04-01,Delhi,ORD101,CRT101,CUST101,10,150.00,15.00,19512,120.00\n" +
+      "2026-04-01,Bengaluru,ORD102,CRT102,CUST102,5,245.00,20.00,391306,190.00\n" +
+      "2026-04-02,Mumbai,ORD103,CRT103,CUST103,12,28.00,0.00,12872,22.00\n";
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", "sample_sales_template.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const handleUpload = async () => {
     if (!file) {
-      setError("Please select a CSV file first.");
+      setError("Please select a sales CSV spreadsheet first.");
       return;
     }
 
@@ -211,327 +261,274 @@ export default function UploadPage() {
     return "SUCCESS";
   }, [result]);
 
-  // Compute stat row figures
   const stats = useMemo(() => {
     if (!result) return null;
     const total = Number(result.total_rows || 0);
     const valid = Number(result.valid_rows || 0);
-    const errors = Number(result.invalid_rows || (total > valid ? total - valid : 0));
-    const percentAccepted = total > 0 ? ((valid / total) * 100).toFixed(1) : "0.0";
-    return { total, valid, errors, percentAccepted };
+    const invalid = Number(result.invalid_rows || (total ? total - valid : 0));
+    const unmappedCount = Array.isArray(result.unmapped_skus) ? result.unmapped_skus.length : 0;
+    const validPct = total > 0 ? Math.round((valid / total) * 100) : 0;
+
+    return { total, valid, invalid, unmappedCount, validPct };
   }, [result]);
 
-  // Sort error breakdown largest category first
-  const sortedErrorBreakdown = useMemo(() => {
-    if (!result || !result.error_breakdown) return [];
-    return Object.entries(result.error_breakdown).sort((a, b) => b[1] - a[1]);
-  }, [result]);
-
-  // Handle SKU mapping global actions
-  const handleApplyAllSuggestions = () => {
-    if (!result || !result.unmapped_skus) return;
-    const updated = { ...skuSelections };
-    result.unmapped_skus.forEach((item) => {
-      const sku = typeof item === "string" ? item : item.sku;
-      if (item.suggested_mapping?.product_id) {
-        updated[sku] = item.suggested_mapping.product_id;
-      }
-    });
-    setSkuSelections(updated);
-  };
-
-  const handleCreateAllAsNew = () => {
-    if (!result || !result.unmapped_skus) return;
-    const updated = { ...skuSelections };
-    result.unmapped_skus.forEach((item) => {
-      const sku = typeof item === "string" ? item : item.sku;
-      updated[sku] = "__CREATE_NEW__";
-    });
-    setSkuSelections(updated);
-  };
-
-  const handleResolveSkusSubmit = async () => {
+  const handleResolveSkus = async () => {
     if (!result || !result.upload_id) return;
+
+    const mappings = Object.entries(skuSelections)
+      .filter(([_, masterId]) => masterId && String(masterId).trim() !== "")
+      .map(([rawSku, masterId]) => ({
+        raw_sku: rawSku,
+        product_id: String(masterId).trim(),
+      }));
+
+    if (mappings.length === 0) {
+      setError("Please select at least one master product to map.");
+      return;
+    }
+
     try {
       setResolving(true);
       setError("");
       setResolveSuccessMsg("");
+      const res = await resolveSkus(result.upload_id, mappings);
 
-      const mappingsPayload = Object.entries(skuSelections).map(([raw_sku, val]) => ({
-        raw_sku,
-        resolved_product_id: val === "__CREATE_NEW__" ? raw_sku : (val || raw_sku),
-        create_new: val === "__CREATE_NEW__",
-      }));
-
-      const res = await resolveSkus(result.upload_id, mappingsPayload);
       setResolveSuccessMsg(
-        `Successfully matched products! ${res.re_ingested_rows || 0} previously failed rows were recovered.`
+        `Successfully linked ${res.resolved_count || mappings.length} SKU(s). Reprocessed rows were updated.`
       );
 
-      // Refresh upload state with latest counts
+      // Remove newly mapped SKUs from the current unmapped list in state
+      const mappedSkusSet = new Set(mappings.map((m) => m.raw_sku));
       setResult((prev) => ({
         ...prev,
-        status: res.remaining_errors > 0 ? "PARTIAL" : "SUCCESS",
-        valid_rows: (prev.valid_rows || 0) + (res.re_ingested_rows || 0),
-        invalid_rows: res.remaining_errors || 0,
-        unmapped_skus: res.remaining_unmapped_skus || [],
+        unmapped_skus: (prev.unmapped_skus || []).filter((item) => {
+          const sku = typeof item === "string" ? item : item.sku;
+          return !mappedSkusSet.has(sku);
+        }),
       }));
-
       await loadUploads();
-      await loadProducts();
     } catch (err) {
-      setError(err.message || "Failed to resolve product matches");
+      setError(err.message || "Failed to resolve SKU mappings");
     } finally {
       setResolving(false);
     }
   };
 
-  // Friendly stage labels
-  const stageLabels = {
-    parsing: "Reading file...",
-    validating: "Checking data quality...",
-    ingesting: "Saving to database...",
-    processing: "Processing...",
-    mapping: "Matching products...",
-  };
-
-  // Upload history table columns
-  const historyColumns = [
-    { key: 'id', title: '#', width: '60px', render: (val) => <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', fontSize: '12px' }}>#{val}</span> },
-    { key: 'filename', title: 'File Name', render: (val) => <span style={{ fontWeight: 500 }}>{val || '—'}</span> },
-    {
-      key: 'status', title: 'Status', width: '120px',
-      render: (val) => {
-        const s = String(val || '').toUpperCase();
-        const variant = (s === 'COMPLETED' || s === 'SUCCESS') ? 'success' : s === 'PARTIAL' ? 'warning' : 'critical';
-        const label = s === 'COMPLETED' ? 'Done' : s === 'SUCCESS' ? 'Done' : s === 'PARTIAL' ? 'Partial' : s === 'FAILED' ? 'Failed' : s || '—';
-        return <StatusBadge variant={variant} label={label} size="sm" />;
-      }
-    },
-    { key: 'total_rows', title: 'Total Rows', isNumeric: true, render: (val) => (val ?? 0).toLocaleString('en-IN') },
-    { key: 'processed_rows', title: 'Imported', isNumeric: true, render: (val) => (val ?? 0).toLocaleString('en-IN') },
-    {
-      key: 'created_at', title: 'Date', width: '160px',
-      render: (val) => val ? new Date(val).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'
-    },
-    {
-      key: '_actions', title: '', width: '180px',
-      render: (_, row) => (
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <a
-            href={getFailedRowsDownloadUrl(row.id)}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', fontSize: '12px', color: 'var(--accent-primary)', fontWeight: 500, textDecoration: 'none' }}
-            title="Download rows that had errors"
-          >
-            <Download size={13} /> Errors
-          </a>
-          <button
-            onClick={(e) => { e.stopPropagation(); handleDeleteUpload(row.id); }}
-            disabled={deletingId === row.id}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: '3px',
-              fontSize: '12px', color: 'var(--status-critical-text)', fontWeight: 500,
-              background: 'none', border: 'none', cursor: 'pointer',
-              opacity: deletingId === row.id ? 0.5 : 1,
-            }}
-            title="Delete this upload and remove its data"
-          >
-            <Trash2 size={13} /> {deletingId === row.id ? "Deleting..." : "Delete"}
-          </button>
-        </div>
-      )
-    },
-  ];
-
   return (
-    <PageShell>
+    <PageShell maxWidth="1400px">
       <PageHeader
-        icon={Upload}
-        title="Upload Sales Data"
-        subtitle="Import your sales CSV file. The system checks every row for errors before saving."
+        icon={UploadCloud}
+        title="Upload Sales Sheet"
+        subtitle="Upload your store's daily sales spreadsheet (CSV). The system automatically checks every item, updates your inventory, and tells you what to reorder today."
+        actions={
+          <button onClick={downloadSampleTemplate} className="diq-btn diq-btn-secondary">
+            <Download size={14} /> Download Sample Template
+          </button>
+        }
       />
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        {/* ── Error Banner ── */}
+        {error && (
+          <div style={{
+            backgroundColor: 'var(--status-critical-bg)',
+            border: '1px solid var(--status-critical-border)',
+            borderRadius: 'var(--border-radius-md)',
+            padding: '14px 18px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            color: 'var(--status-critical-text)',
+            fontSize: '13px',
+          }}>
+            <XCircle size={18} style={{ flexShrink: 0 }} />
+            <div style={{ flex: 1 }}>{error}</div>
+            <button
+              onClick={() => setError("")}
+              style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4 }}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
 
-        {/* ── Upload Input Card ── */}
-        <Card title="Select File" icon={FileSpreadsheet} subtitle="Choose a CSV file from your computer with sales transaction data.">
-
-          {/* Duplicate file warning */}
-          {duplicateConflict && (
-            <div style={{
-              marginBottom: '16px', padding: '12px 16px', borderRadius: 'var(--border-radius-md)',
-              backgroundColor: 'var(--status-warning-bg)', border: '1px solid var(--status-warning-border)',
-              fontSize: '13px', color: 'var(--status-warning-text)',
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, marginBottom: '4px' }}>
-                <AlertTriangle size={16} /> This file was already uploaded
-              </div>
-              <p style={{ margin: '0 0 8px 0' }}>
-                The same file was previously uploaded as Job #{duplicateConflict.existing_job_id}.
-              </p>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: 500 }}>
-                <input
-                  type="checkbox"
-                  checked={allowDuplicate}
-                  onChange={(e) => setAllowDuplicate(e.target.checked)}
-                  style={{ accentColor: 'var(--accent-primary)' }}
-                />
-                Upload again anyway
-              </label>
+        {/* ── Duplicate Conflict Resolution Card ── */}
+        {duplicateConflict && (
+          <div style={{
+            backgroundColor: 'var(--status-warning-bg)',
+            border: '1px solid var(--status-warning-border)',
+            borderRadius: 'var(--border-radius-md)',
+            padding: '16px 20px',
+            color: 'var(--text-primary)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px' }}>
+              <AlertTriangle size={18} style={{ color: 'var(--status-warning-text)' }} />
+              <strong style={{ fontSize: '14px' }}>Duplicate File Detected</strong>
             </div>
-          )}
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '14px' }}>
+              This exact CSV file was already uploaded in <strong>Job #{duplicateConflict.prior_job_id}</strong>.
+              Would you like to import it again?
+            </p>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button
+                onClick={() => {
+                  setAllowDuplicate(true);
+                  setDuplicateConflict(null);
+                  setTimeout(() => handleUpload(), 50);
+                }}
+                className="diq-btn diq-btn-primary diq-btn-sm"
+              >
+                Upload Anyway
+              </button>
+              <button
+                onClick={() => {
+                  setDuplicateConflict(null);
+                  setFile(null);
+                }}
+                className="diq-btn diq-btn-secondary diq-btn-sm"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
 
-          {/* File input + upload button */}
-          <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
-            <div style={{ flex: '1 1 300px' }}>
+        {/* ── Success Banner ── */}
+        {resolveSuccessMsg && (
+          <div style={{
+            backgroundColor: 'var(--status-success-bg)',
+            border: '1px solid var(--status-success-border)',
+            borderRadius: 'var(--border-radius-md)',
+            padding: '14px 18px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            color: 'var(--status-success-text)',
+            fontSize: '13px',
+          }}>
+            <CheckCircle2 size={18} style={{ flexShrink: 0 }} />
+            <div>{resolveSuccessMsg}</div>
+          </div>
+        )}
+
+        {/* ── Upload Area Card ── */}
+        <Card title="Upload Sales Spreadsheet" icon={FileSpreadsheet}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {/* Drag & Drop Zone */}
+            <div
+              onDragEnter={handleDrag}
+              onDragOver={handleDrag}
+              onDragLeave={handleDrag}
+              onDrop={handleDrop}
+              style={{
+                border: dragActive ? '2px dashed var(--accent-primary)' : '2px dashed var(--border-subtle)',
+                borderRadius: 'var(--border-radius-lg)',
+                padding: '36px 20px',
+                textAlign: 'center',
+                backgroundColor: dragActive ? 'var(--bg-surface-hover)' : 'var(--bg-surface-subtle)',
+                transition: 'all 0.15s ease',
+                cursor: 'pointer',
+              }}
+            >
               <input
                 type="file"
                 accept=".csv"
+                id="file-upload"
                 onChange={handleFileChange}
-                id="csv-upload-input"
                 style={{ display: 'none' }}
               />
-              <label
-                htmlFor="csv-upload-input"
-                style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
-                  padding: '32px 20px', border: '2px dashed var(--border-strong)',
-                  borderRadius: 'var(--border-radius-lg)', cursor: 'pointer',
-                  backgroundColor: file ? 'var(--status-info-bg)' : 'var(--bg-surface-subtle)',
-                  borderColor: file ? 'var(--accent-primary)' : 'var(--border-strong)',
-                  transition: 'all 0.15s ease', textAlign: 'center',
-                }}
-              >
+              <label htmlFor="file-upload" style={{ cursor: 'pointer', display: 'block' }}>
                 {file ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
-                    <FileSpreadsheet size={24} style={{ color: 'var(--accent-primary)' }} />
-                    <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: '14px' }}>{file.name}</span>
-                    <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{(file.size / 1024).toFixed(1)} KB — Click to change</span>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+                    <div style={{
+                      width: '40px', height: '40px', borderRadius: '50%',
+                      backgroundColor: 'var(--status-success-bg)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      color: 'var(--status-success-text)',
+                    }}>
+                      <Check size={20} />
+                    </div>
+                    <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: '15px' }}>{file.name}</span>
+                    <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                      {(file.size / 1024).toFixed(1)} KB — Ready to upload
+                    </span>
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
-                    <Upload size={24} style={{ color: 'var(--text-muted)' }} />
-                    <span style={{ fontWeight: 500, color: 'var(--text-secondary)', fontSize: '14px' }}>Click to select a CSV file</span>
-                    <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>or drag and drop here</span>
+                    <UploadCloud size={32} style={{ color: 'var(--accent-primary)', marginBottom: '4px' }} />
+                    <span style={{ fontWeight: 500, color: 'var(--text-primary)', fontSize: '14px' }}>
+                      Drag and drop your sales CSV here, or click to browse
+                    </span>
+                    <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                      Supports standard comma-separated sales exports up to 100MB
+                    </span>
                   </div>
                 )}
               </label>
             </div>
 
-            <button
-              onClick={handleUpload}
-              disabled={!file || uploading}
-              className="diq-btn diq-btn-primary"
-              style={{ padding: '10px 24px', fontSize: '14px', opacity: (!file || uploading) ? 0.5 : 1 }}
-            >
-              {uploading ? (
-                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
-                  Processing...
+            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  When data overlaps:
                 </span>
-              ) : (
-                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <Upload size={16} />
-                  Upload & Validate
-                </span>
-              )}
-            </button>
+                <SegmentedControl
+                  size="sm"
+                  value={conflictMode}
+                  onChange={setConflictMode}
+                  options={[
+                    { value: "REPLACE", label: "Replace existing dates" },
+                    { value: "APPEND", label: "Add to existing" },
+                    { value: "UPSERT", label: "Update duplicates" },
+                  ]}
+                />
+              </div>
+
+              <button
+                onClick={handleUpload}
+                disabled={!file || uploading}
+                className="diq-btn diq-btn-primary"
+                style={{ padding: '10px 24px', fontSize: '14px', opacity: (!file || uploading) ? 0.5 : 1 }}
+              >
+                {uploading ? (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
+                    Processing...
+                  </span>
+                ) : (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Upload size={16} />
+                    Upload & Validate
+                  </span>
+                )}
+              </button>
+            </div>
           </div>
-
-          {/* Upload mode selector */}
-          <div style={{
-            marginTop: '16px', paddingTop: '12px', borderTop: '1px solid var(--border-subtle)',
-            display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px',
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>When data overlaps:</span>
-              <SegmentedControl
-                size="sm"
-                value={conflictMode}
-                onChange={setConflictMode}
-                options={[
-                  { value: 'REPLACE', label: 'Replace old data' },
-                  { value: 'ACCUMULATE', label: 'Add to existing' },
-                ]}
-              />
-            </div>
-
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-secondary)', cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={allowDuplicate}
-                onChange={(e) => setAllowDuplicate(e.target.checked)}
-                style={{ accentColor: 'var(--accent-primary)' }}
-              />
-              Allow re-uploading the same file
-            </label>
-          </div>
-
-          {/* Error message */}
-          {error && (
-            <div style={{
-              marginTop: '12px', padding: '10px 14px', borderRadius: 'var(--border-radius-md)',
-              backgroundColor: 'var(--status-critical-bg)', border: '1px solid var(--status-critical-border)',
-              color: 'var(--status-critical-text)', fontSize: '13px',
-              display: 'flex', alignItems: 'center', gap: '6px',
-            }}>
-              <XCircle size={16} style={{ flexShrink: 0 }} /> {error}
-            </div>
-          )}
-
-          {/* Success message */}
-          {resolveSuccessMsg && (
-            <div style={{
-              marginTop: '12px', padding: '10px 14px', borderRadius: 'var(--border-radius-md)',
-              backgroundColor: 'var(--status-success-bg)', border: '1px solid var(--status-success-border)',
-              color: 'var(--status-success-text)', fontSize: '13px',
-              display: 'flex', alignItems: 'center', gap: '6px',
-            }}>
-              <CheckCircle2 size={16} style={{ flexShrink: 0 }} /> {resolveSuccessMsg}
-            </div>
-          )}
         </Card>
 
-        {/* ── Processing Progress ── */}
+        {/* ── Async Job Polling Progress ── */}
         {jobProgress && (
-          <Card style={{ borderColor: 'var(--accent-primary-border)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <div style={{
-                  width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--accent-primary)',
-                  animation: 'pulse 2s infinite',
-                }} />
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)' }}>
-                    Processing your file...
-                  </div>
-                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                    {stageLabels[jobProgress.current_stage] || 'Working on it...'}
-                  </div>
-                </div>
-              </div>
-              <StatusBadge variant="info" label={`Job #${jobProgress.job_id}`} size="sm" />
+          <Card title="Ingestion in Progress" icon={RefreshCw}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '13px' }}>
+              <span style={{ color: 'var(--text-secondary)' }}>
+                Stage: <strong>{jobProgress.current_stage || "Processing"}</strong>
+              </span>
+              <span style={{ fontWeight: 600, color: 'var(--accent-primary)' }}>
+                {jobProgress.progress_pct || 10}%
+              </span>
             </div>
-
-            {/* Progress bar */}
-            <div style={{
-              width: '100%', height: '6px', backgroundColor: 'var(--bg-surface-subtle)',
-              borderRadius: '3px', overflow: 'hidden',
-            }}>
+            <div style={{ height: '6px', borderRadius: '3px', backgroundColor: 'var(--bg-surface-subtle)', overflow: 'hidden' }}>
               <div style={{
-                height: '100%', width: `${Math.max(5, jobProgress.progress_pct || 0)}%`,
-                backgroundColor: 'var(--accent-primary)', borderRadius: '3px',
-                transition: 'width 0.5s ease-out',
+                height: '100%',
+                width: `${jobProgress.progress_pct || 10}%`,
+                backgroundColor: 'var(--accent-primary)',
+                transition: 'width 0.3s ease',
               }} />
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '6px', fontSize: '12px', fontWeight: 600, color: 'var(--accent-primary)' }}>
-              {jobProgress.progress_pct || 0}% complete
             </div>
           </Card>
         )}
 
-        {/* ── Upload Results ── */}
+        {/* ── Upload Results Card ── */}
         {result && stats && (
           <Card
             style={{
@@ -539,7 +536,7 @@ export default function UploadPage() {
                            uploadState === 'PARTIAL' ? 'var(--status-warning-border)' : 'var(--status-critical-border)',
             }}
           >
-            {/* Result Header */}
+            {/* Header */}
             <div style={{
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
               paddingBottom: '16px', borderBottom: '1px solid var(--border-subtle)',
@@ -551,214 +548,114 @@ export default function UploadPage() {
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   backgroundColor: uploadState === 'SUCCESS' ? 'var(--status-success-bg)' :
                                    uploadState === 'PARTIAL' ? 'var(--status-warning-bg)' : 'var(--status-critical-bg)',
-                  color: uploadState === 'SUCCESS' ? 'var(--status-success-icon)' :
-                         uploadState === 'PARTIAL' ? 'var(--status-warning-icon)' : 'var(--status-critical-icon)',
+                  color: uploadState === 'SUCCESS' ? 'var(--status-success-text)' :
+                         uploadState === 'PARTIAL' ? 'var(--status-warning-text)' : 'var(--status-critical-text)',
                 }}>
-                  {uploadState === 'SUCCESS' && <CheckCircle2 size={22} />}
-                  {uploadState === 'PARTIAL' && <AlertTriangle size={22} />}
-                  {uploadState === 'REJECTED' && <XCircle size={22} />}
+                  {uploadState === 'SUCCESS' ? <CheckCircle2 size={22} /> :
+                   uploadState === 'PARTIAL' ? <AlertTriangle size={22} /> : <XCircle size={22} />}
                 </div>
                 <div>
-                  <div style={{ fontSize: '17px', fontWeight: 700, color: 'var(--text-primary)' }}>
-                    {uploadState === 'SUCCESS' && 'All rows imported successfully'}
-                    {uploadState === 'PARTIAL' && 'Some rows had errors'}
-                    {uploadState === 'REJECTED' && 'Upload failed — no rows imported'}
-                  </div>
-                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                    Job #{result.upload_id || result.id || 'N/A'} • {result.filename || 'Uploaded file'}
-                  </div>
+                  <h3 style={{ fontSize: '16px', fontWeight: 700, margin: 0 }}>
+                    {uploadState === 'SUCCESS' ? 'All Rows Validated & Imported' :
+                     uploadState === 'PARTIAL' ? 'Partially Imported with Warnings' : 'Upload Rejected'}
+                  </h3>
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                    Job #{result.upload_id || result.job_id || '—'}
+                  </span>
                 </div>
               </div>
 
-              {stats.errors > 0 && result.upload_id && (
-                <a
-                  href={getFailedRowsDownloadUrl(result.upload_id)}
-                  download={`failed_rows_${result.upload_id}.csv`}
-                  className="diq-btn diq-btn-secondary diq-btn-sm"
-                  style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
-                >
-                  <Download size={14} /> Download error rows ({stats.errors.toLocaleString('en-IN')})
-                </a>
-              )}
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                {stats.invalid > 0 && result.upload_id && (
+                  <a
+                    href={getFailedRowsDownloadUrl(result.upload_id)}
+                    className="diq-btn diq-btn-secondary diq-btn-sm"
+                    download
+                  >
+                    <Download size={14} /> Download {stats.invalid} Failed Rows
+                  </a>
+                )}
+                <StatusBadge
+                  variant={uploadState === 'SUCCESS' ? 'success' : uploadState === 'PARTIAL' ? 'warning' : 'critical'}
+                  label={result.status || uploadState}
+                />
+              </div>
             </div>
 
-            {/* Stats Row */}
+            {/* KPI Stats */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '12px', marginTop: '16px' }}>
-              <StatCard label="Total Rows" value={stats.total.toLocaleString('en-IN')} />
-              <StatCard label="Imported" value={stats.valid.toLocaleString('en-IN')} subtext="Saved to database" />
-              <StatCard label="Errors" value={stats.errors.toLocaleString('en-IN')} subtext="Could not be saved" />
-              <StatCard label="Success Rate" value={`${stats.percentAccepted}%`} />
+              <StatCard label="Total Rows" value={stats.total.toLocaleString()} />
+              <StatCard label="Accepted Rows" value={stats.valid.toLocaleString()} subtext={`${stats.validPct}% valid`} />
+              <StatCard
+                label="Rejected Rows"
+                value={stats.invalid.toLocaleString()}
+                style={stats.invalid > 0 ? { borderColor: 'var(--status-critical-border)' } : {}}
+              />
+              <StatCard label="Unmapped SKUs" value={stats.unmappedCount} />
             </div>
 
-            {/* Error Breakdown */}
-            {sortedErrorBreakdown.length > 0 && (
+            {/* Unmapped SKU Resolution UI */}
+            {stats.unmappedCount > 0 && (
               <div style={{
-                marginTop: '20px', padding: '16px', backgroundColor: 'var(--bg-surface-subtle)',
-                borderRadius: 'var(--border-radius-lg)', border: '1px solid var(--border-subtle)',
+                marginTop: '20px', padding: '16px',
+                borderRadius: 'var(--border-radius-md)',
+                backgroundColor: 'var(--bg-surface-subtle)',
+                border: '1px solid var(--border-subtle)',
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                  <span style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-primary)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                    Error Details
-                  </span>
-                  <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Sorted by most common first</span>
+                  <div>
+                    <h4 style={{ margin: 0, fontSize: '14px', fontWeight: 600 }}>Unmapped Products Detected</h4>
+                    <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                      Match raw incoming SKU identifiers with verified master products to include them in forecasting.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleResolveSkus}
+                    disabled={resolving}
+                    className="diq-btn diq-btn-primary diq-btn-sm"
+                  >
+                    {resolving ? 'Saving Mappings...' : 'Apply Mappings'}
+                  </button>
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  {sortedErrorBreakdown.map(([category, count]) => {
-                    const pct = stats.errors > 0 ? ((count / stats.errors) * 100).toFixed(1) : 0;
-                    // Convert category to plain English
-                    const readableCategory = category
-                      .replace(/_/g, ' ')
-                      .replace(/\b\w/g, l => l.toUpperCase());
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '10px' }}>
+                  {result.unmapped_skus.map((item, idx) => {
+                    const rawSku = typeof item === "string" ? item : item.sku;
+                    const suggestion = typeof item === "object" ? item.suggested_mapping : null;
+
                     return (
-                      <div key={category}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px', fontSize: '12px' }}>
-                          <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{readableCategory}</span>
-                          <span style={{ color: 'var(--text-muted)' }}>{count.toLocaleString('en-IN')} rows ({pct}%)</span>
+                      <div key={idx} style={{
+                        padding: '10px 12px', borderRadius: '6px',
+                        backgroundColor: 'var(--bg-surface)', border: '1px solid var(--border-subtle)',
+                        fontSize: '12px',
+                      }}>
+                        <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: '6px' }}>
+                          SKU: {rawSku}
                         </div>
-                        <div style={{ width: '100%', height: '4px', backgroundColor: '#e2e8f0', borderRadius: '2px', overflow: 'hidden' }}>
-                          <div style={{
-                            width: `${pct}%`, height: '100%', backgroundColor: 'var(--status-critical-icon)',
-                            borderRadius: '2px', transition: 'width 0.3s ease',
-                          }} />
-                        </div>
+                        <select
+                          value={skuSelections[rawSku] || ""}
+                          onChange={(e) => setSkuSelections({ ...skuSelections, [rawSku]: e.target.value })}
+                          style={{
+                            width: '100%', padding: '6px 8px', borderRadius: '4px',
+                            border: '1px solid var(--border-strong)', fontSize: '12px',
+                            backgroundColor: '#ffffff', color: 'var(--text-primary)',
+                          }}
+                        >
+                          <option value="">-- Link to Master Product --</option>
+                          {products.map((p) => (
+                            <option key={p.product_id} value={p.product_id}>
+                              #{p.product_id} - {p.product_name || `Product ${p.product_id}`}
+                            </option>
+                          ))}
+                        </select>
+                        {suggestion && (
+                          <div style={{ marginTop: '4px', fontSize: '10px', color: 'var(--accent-primary)' }}>
+                            Suggested: #{suggestion.product_id} ({Math.round((suggestion.confidence || 0) * 100)}% match)
+                          </div>
+                        )}
                       </div>
                     );
                   })}
-                </div>
-              </div>
-            )}
-
-            {/* SKU Mapping Panel */}
-            {result.unmapped_skus && result.unmapped_skus.length > 0 && (
-              <div style={{
-                marginTop: '20px', padding: '16px',
-                borderRadius: 'var(--border-radius-lg)',
-                border: '1px solid var(--status-warning-border)',
-                backgroundColor: '#ffffff',
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
-                  <div>
-                    <div style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <AlertTriangle size={18} style={{ color: 'var(--status-warning-icon)' }} />
-                      {result.unmapped_skus.length} unrecognised product{result.unmapped_skus.length !== 1 ? 's' : ''} found
-                    </div>
-                    <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '4px 0 0' }}>
-                      These product codes don't match any product in your catalogue. Match them below or create new products.
-                    </p>
-                  </div>
-
-                  <div style={{ display: 'flex', gap: '6px' }}>
-                    <button onClick={handleApplyAllSuggestions} className="diq-btn diq-btn-secondary diq-btn-sm">
-                      Accept all suggestions
-                    </button>
-                    <button onClick={handleCreateAllAsNew} className="diq-btn diq-btn-secondary diq-btn-sm">
-                      Create all as new
-                    </button>
-                  </div>
-                </div>
-
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-                    <thead>
-                      <tr style={{ borderBottom: '1px solid var(--border-subtle)', backgroundColor: 'var(--bg-surface-subtle)' }}>
-                        <th style={{ padding: '8px 12px', textAlign: 'left', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-muted)' }}>Product Code</th>
-                        <th style={{ padding: '8px 12px', textAlign: 'right', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-muted)' }}>Times Found</th>
-                        <th style={{ padding: '8px 12px', textAlign: 'left', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-muted)' }}>Best Match</th>
-                        <th style={{ padding: '8px 12px', textAlign: 'left', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-muted)' }}>Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {result.unmapped_skus.map((item, idx) => {
-                        const sku = typeof item === "string" ? item : item.sku;
-                        const count = typeof item === "object" ? item.occurrences || 1 : 1;
-                        const suggested = item.suggested_mapping?.product_id;
-                        const conf = item.suggested_mapping?.confidence;
-
-                        return (
-                          <tr key={sku || idx} style={{ borderBottom: '1px solid var(--border-subtle)' }}
-                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-surface-subtle)'}
-                              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#ffffff'}
-                          >
-                            <td style={{ padding: '10px 12px', fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--text-primary)' }}>
-                              {sku}
-                            </td>
-                            <td style={{ padding: '10px 12px', textAlign: 'right', color: 'var(--text-secondary)' }} className="tabular-nums">
-                              {count}
-                            </td>
-                            <td style={{ padding: '10px 12px' }}>
-                              {suggested ? (
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                  <span style={{ fontWeight: 500 }}>{suggested}</span>
-                                  {conf && (
-                                    <StatusBadge
-                                      variant={conf >= 0.75 ? 'success' : conf >= 0.5 ? 'warning' : 'neutral'}
-                                      label={`${(conf * 100).toFixed(0)}% match`}
-                                      size="sm"
-                                    />
-                                  )}
-                                </div>
-                              ) : (
-                                <span style={{ fontSize: '12px', color: 'var(--text-disabled)', fontStyle: 'italic' }}>No match found</span>
-                              )}
-                            </td>
-                            <td style={{ padding: '10px 12px' }}>
-                              <select
-                                value={skuSelections[sku] || ""}
-                                onChange={(e) =>
-                                  setSkuSelections((prev) => ({
-                                    ...prev,
-                                    [sku]: e.target.value,
-                                  }))
-                                }
-                                style={{
-                                  padding: '5px 8px', borderRadius: 'var(--border-radius-sm)',
-                                  border: '1px solid var(--border-strong)', fontSize: '12px',
-                                  backgroundColor: '#ffffff', color: 'var(--text-primary)',
-                                  width: '100%', maxWidth: '220px',
-                                }}
-                              >
-                                <option value="">— Choose action —</option>
-                                {suggested && (
-                                  <option value={suggested}>
-                                    Match to: {suggested}
-                                  </option>
-                                )}
-                                <option value="__CREATE_NEW__">
-                                  + Add as new product
-                                </option>
-                                <optgroup label="Your Products">
-                                  {products.map((p) => (
-                                    <option key={p.product_id} value={p.product_id}>
-                                      {p.product_id} — {p.product_name || "Unnamed"}
-                                    </option>
-                                  ))}
-                                </optgroup>
-                              </select>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '16px' }}>
-                  <button
-                    onClick={handleResolveSkusSubmit}
-                    disabled={resolving}
-                    className="diq-btn diq-btn-primary"
-                    style={{ opacity: resolving ? 0.5 : 1 }}
-                  >
-                    {resolving ? (
-                      <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> Saving matches...
-                      </span>
-                    ) : (
-                      <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <RefreshCw size={14} /> Save matches & retry failed rows
-                      </span>
-                    )}
-                  </button>
                 </div>
               </div>
             )}
@@ -766,28 +663,75 @@ export default function UploadPage() {
         )}
 
         {/* ── Upload History ── */}
-        <Card title="Upload History" icon={FileSpreadsheet} subtitle="All previous file uploads and their results.">
+        <Card
+          title="Upload History"
+          icon={RefreshCw}
+          actions={
+            <button onClick={loadUploads} className="diq-btn diq-btn-secondary diq-btn-sm">
+              <RefreshCw size={12} /> Refresh
+            </button>
+          }
+        >
           {uploads.length === 0 ? (
             <EmptyState
-              icon={Upload}
+              icon={FileSpreadsheet}
               title="No uploads yet"
-              description="Upload your first sales data CSV file to get started with forecasting."
+              description="Upload your first sales CSV to begin demand intelligence analysis."
             />
           ) : (
             <DataTable
-              columns={historyColumns}
+              columns={[
+                { key: 'id', label: 'ID', render: (row) => `#${row.id}` },
+                { key: 'filename', label: 'File Name', render: (row) => <strong>{row.filename}</strong> },
+                {
+                  key: 'status',
+                  label: 'Status',
+                  render: (row) => (
+                    <StatusBadge
+                      variant={
+                        row.status === 'COMPLETED' || row.status === 'SUCCESS' ? 'success' :
+                        row.status === 'PARTIAL' ? 'warning' : 'critical'
+                      }
+                      label={row.status}
+                      size="sm"
+                    />
+                  ),
+                },
+                {
+                  key: 'rows',
+                  label: 'Rows Ingested',
+                  render: (row) => `${(row.processed_rows || 0).toLocaleString()} / ${(row.total_rows || 0).toLocaleString()}`,
+                },
+                {
+                  key: 'date',
+                  label: 'Date',
+                  render: (row) => row.created_at ? new Date(row.created_at).toLocaleString('en-IN') : 'Recent',
+                },
+                {
+                  key: 'actions',
+                  label: 'Actions',
+                  render: (row) => (
+                    <button
+                      onClick={() => handleDeleteUpload(row.id)}
+                      disabled={deletingId === row.id}
+                      className="diq-btn diq-btn-secondary diq-btn-sm"
+                      style={{ padding: '4px 8px', color: 'var(--status-critical-text)' }}
+                      title="Delete upload and its data"
+                    >
+                      <Trash2 size={12} /> {deletingId === row.id ? 'Deleting...' : 'Delete'}
+                    </button>
+                  ),
+                },
+              ]}
               data={uploads}
               keyField="id"
-              emptyMessage="No upload history available."
             />
           )}
         </Card>
       </div>
 
-      {/* Spin keyframe for loader */}
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
       `}</style>
     </PageShell>
   );

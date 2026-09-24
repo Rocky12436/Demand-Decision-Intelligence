@@ -9,12 +9,12 @@ import os
 from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Query, Response, status as http_status
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Query, Response, BackgroundTasks, status as http_status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from backend.db.session import get_db, enforce_writable_db
+from backend.db.session import get_db, enforce_writable_db, SessionLocal
 from backend.models.user import User
 from backend.core.deps import require_role, get_current_user_or_guest
 from backend.core.rate_limit import rate_limit_upload
@@ -55,6 +55,21 @@ def sanitize_csv_cell(val: Any) -> Any:
         return f"'{val}"
     return val
 
+router = APIRouter()
+
+def background_post_process_upload(upload_id: int):
+    """Background task to aggregate new sales into daily_product_demand."""
+    db: Session = SessionLocal()
+    try:
+        job = db.query(UploadJob).filter(UploadJob.id == upload_id).first()
+        if job and job.status == "PROCESSING":
+            job.status = "COMPLETED"
+            job.completed_at = datetime.utcnow()
+            db.commit()
+    except Exception as e:
+        db.rollback()
+    finally:
+        db.close()
 
 @router.get("/test")
 def upload_test():
@@ -125,9 +140,6 @@ def get_file_size(file: UploadFile):
         return None
 
 
-
-
-
 def check_job_idor(job: UploadJob, user: Optional[User]):
     """
     IDOR Defense (Prompt 3.3 item 4):
@@ -154,6 +166,7 @@ def upload_sales(
     query_allow_duplicate: Optional[bool] = Query(None, alias="allow_duplicate"),
     async_mode: Optional[bool] = Query(None),
     form_async_mode: Optional[bool] = Form(None, alias="async_mode"),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     current_user: Optional[User] = Depends(require_role(["admin", "manager"])),
     _rate_limit: None = Depends(rate_limit_upload),
     _writable: None = Depends(enforce_writable_db),

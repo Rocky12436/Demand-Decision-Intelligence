@@ -1,17 +1,12 @@
 """
-backend/main.py
----------------
-Application entry point:
-- Configures global structured JSON logging via structlog.
-- Traces requests with X-Request-ID context and instruments Prometheus metrics.
-- Global exception handler preventing error/stack leakage (Prompt 3.3 item 9 & Prompt 3.5 item 2).
-- Hardened CORS configuration with credentials support and explicit origin list.
-- Registers all feature, health, auth, admin, and metrics routers.
+Main FastAPI Application Entrypoint
+Project: Demand-Decision-Intelligence
+Location: backend/main.py
 """
 
 import time
 import uuid
-import logging
+from pathlib import Path
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,8 +42,8 @@ from backend.api import (
     assistant,
     digests,
     quality,
+    chat,
 )
-
 
 # Initialize structured logging globally
 setup_logging()
@@ -112,6 +107,7 @@ async def request_tracing_and_metrics_middleware(request: Request, call_next):
         ).observe(duration)
 
         response.headers["X-Request-ID"] = req_id
+        response.headers["X-Process-Time"] = f"{(duration * 1000.0):.2f}ms"
         return response
     except Exception as exc:
         duration = time.time() - start_time
@@ -152,7 +148,7 @@ app.include_router(assistant.router, prefix=f"{settings.API_V1_STR}/assistant", 
 app.include_router(digests.router, prefix=f"{settings.API_V1_STR}/digests", tags=["Weekly Narrative Digests"])
 app.include_router(quality.router, prefix=f"{settings.API_V1_STR}/quality", tags=["Data Quality Scorecard"])
 app.include_router(admin.router, prefix=settings.API_V1_STR, tags=["Observability & Admin"])
-
+app.include_router(chat.router, prefix=f"{settings.API_V1_STR}/chat", tags=["AI Decision Assistant"])
 
 
 @app.get("/")

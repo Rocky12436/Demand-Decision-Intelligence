@@ -5,15 +5,25 @@ import Header from './Header';
 import FloatingChatBot from '../common/FloatingChatBot';
 
 const titleMap = {
-  '/dashboard': 'Dashboard Overview',
-  '/upload': 'Data Ingestion & Validation',
-  '/forecast': 'Demand Forecasting Engine',
-  '/inventory': 'Inventory Intelligence & Risk',
-  '/trends': 'Trend Analysis & Anomalies',
-  '/price-insights': 'Price Insights & Elasticity',
-  '/evaluation': 'Model Performance Evaluation',
-  '/assistant': 'AI Advisor & Decision Intelligence Studio',
+  '/dashboard': 'Store & Business Overview',
+  '/upload': 'Upload Daily Sales Sheet',
+  '/forecast': 'Sales Demand Predictions',
+  '/inventory': 'Stock & Reorder Decision Planner',
+  '/trends': 'Surge Spikes & Stockout Alerts',
+  '/price-insights': 'Market Prices & Discount Elasticity',
+  '/market-prices': 'Government Market Rates (Agmarknet)',
+  '/evaluation': 'Forecast Model Accuracy Check',
+  '/assistant': 'AI Decision Copilot & Advisor',
   '/calendar': 'Indian Festival & Holiday Calendar',
+  '/budget-planner': 'Capital Allocation Planner',
+  '/simulator': 'What-If Policy Simulator',
+  '/abc-xyz': 'ABC-XYZ Demand Classification',
+  '/dead-stock': 'Dead Stock & Liquidation Engine',
+  '/purchase-orders': 'Procurement & Purchase Orders',
+  '/recommendations': 'Action Recommendations',
+  '/transfers': 'Inter-City Stock Transfers',
+  '/quality': 'Data Quality Scorecard',
+  '/model-performance': 'Model Performance Leaderboard',
 };
 
 export default function Layout() {
