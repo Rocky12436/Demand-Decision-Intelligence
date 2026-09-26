@@ -21,9 +21,10 @@ import {
   RefreshCw,
   Award,
   Layers,
-  Activity,
   History,
+  Download,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import api, { recomputeForecast } from '../../services/api';
 import { PageShell, PageHeader, Card, DataTable, Badge, MetricLeaderboardCard } from '../../components/ui';
 
@@ -35,9 +36,10 @@ const AVAILABLE_MODELS = [
 ];
 
 export default function ForecastPage() {
+  const navigate = useNavigate();
   // Config state
-  const [topProducts, setTopProducts] = useState(['19512', '391306', '12872', '3881', '445675']);
-  const [selectedProduct, setSelectedProduct] = useState('19512');
+  const [topProducts, setTopProducts] = useState([]);
+  const [selectedProduct, setSelectedProduct] = useState('');
   const [selectedHorizon, setSelectedHorizon] = useState(7);
   const [selectedModels, setSelectedModels] = useState(['prophet', 'moving_avg', 'naive']);
   const [activeModelTab, setActiveModelTab] = useState('prophet');
@@ -69,11 +71,12 @@ export default function ForecastPage() {
       // Fetch demand summary to discover top products
       const sumRes = await api.get('/api/demand/summary').catch(() => null);
       if (sumRes?.data?.top_products_by_qty?.length > 0) {
-        const pIds = sumRes.data.top_products_by_qty.map((p) => p.product_id);
+        const pIds = sumRes.data.top_products_by_qty.map((p) => String(p.product_id));
         setTopProducts(pIds);
-        if (!pIds.includes(selectedProduct)) {
-          setSelectedProduct(pIds[0]);
-        }
+        setSelectedProduct(pIds[0]);
+      } else {
+        setTopProducts([]);
+        setSelectedProduct('');
       }
 
       // Fetch data quality scorecard & gate status
@@ -117,6 +120,10 @@ export default function ForecastPage() {
   }, [selectedProduct, selectedHorizon, activeModelTab, runs]);
 
   const loadSelectedRunDetail = async () => {
+    if (!selectedProduct) {
+      setActiveRunDetail(null);
+      return;
+    }
     // Find matching completed run in memory
     const match = runs.find(
       (r) =>
@@ -320,6 +327,34 @@ export default function ForecastPage() {
               {historicalWarning.message || `Forecast horizon is anchored to historical data through ${historicalWarning.as_of} (${historicalWarning.days_behind} days ago). Predictions represent retrospective projections, not live real-time conditions.`}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Zero State Alert Banner */}
+      {topProducts.length === 0 && !loading && (
+        <div style={{
+          padding: '20px 24px',
+          backgroundColor: 'var(--surface-card, #ffffff)',
+          border: '1px solid var(--border-color, #e2e8f0)',
+          borderRadius: '12px',
+          marginBottom: '20px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '16px',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
+        }}>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)' }}>
+              No Product Demand Data Found
+            </div>
+            <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
+              Upload your retail sales CSV file to run Prophet and statistical demand forecasts.
+            </div>
+          </div>
+          <button onClick={() => navigate('/upload')} className="diq-btn diq-btn-primary" style={{ whiteSpace: 'nowrap' }}>
+            <Download size={15} /> Upload Sales CSV
+          </button>
         </div>
       )}
 

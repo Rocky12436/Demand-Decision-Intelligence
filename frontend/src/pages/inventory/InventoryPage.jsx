@@ -17,7 +17,9 @@ import {
   Eye,
   ShoppingCart,
   X,
+  Download,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import api, { recomputeForecast } from '../../services/api';
 import ForwardBuyWidget from './ForwardBuyWidget';
 import SkuExplainabilityModal from '../../components/common/SkuExplainabilityModal';
@@ -38,6 +40,7 @@ const Z_SCORES = {
 };
 
 export default function InventoryPage() {
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('recommendations'); // 'recommendations' | 'simulation'
   const [data, setData] = useState([]);
   const [simulationData, setSimulationData] = useState([]);
@@ -74,14 +77,7 @@ export default function InventoryPage() {
       }
     } catch (err) {
       console.error('Failed to load inventory recommendations', err);
-      setData([
-        { product_id: 19512, city_name: 'Delhi', mean_daily_demand: 8690.15, std_daily_demand: 878.87 },
-        { product_id: 391306, city_name: 'Bengaluru', mean_daily_demand: 6420.50, std_daily_demand: 654.12 },
-        { product_id: 12872, city_name: 'Mumbai', mean_daily_demand: 5310.20, std_daily_demand: 540.30 },
-        { product_id: 3881, city_name: 'HR-NCR', mean_daily_demand: 4890.00, std_daily_demand: 492.40 },
-        { product_id: 445675, city_name: 'Delhi', mean_daily_demand: 4120.80, std_daily_demand: 430.15 },
-        { product_id: 1, city_name: 'Delhi', mean_daily_demand: 3250.60, std_daily_demand: 340.20 },
-      ]);
+      setData([]);
     } finally {
       setLoading(false);
     }
@@ -263,6 +259,33 @@ export default function InventoryPage() {
       />
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        {/* Zero State Alert Banner */}
+        {data.length === 0 && !loading && (
+          <div style={{
+            padding: '20px 24px',
+            backgroundColor: 'var(--surface-card, #ffffff)',
+            border: '1px solid var(--border-color, #e2e8f0)',
+            borderRadius: '12px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '16px',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
+          }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)' }}>
+                No Inventory Recommendations Found
+              </div>
+              <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                Upload a retail sales CSV file to compute safety stock, reorder levels, and replenishment quantities.
+              </div>
+            </div>
+            <button onClick={() => navigate('/upload')} className="diq-btn diq-btn-primary" style={{ whiteSpace: 'nowrap' }}>
+              <Download size={15} /> Upload Sales CSV
+            </button>
+          </div>
+        )}
+
         {/* ── KPI Cards ── */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '12px' }}>
           <StatCard label="Products Tracked" value={totalSKUs.toLocaleString('en-IN')} subtext="In selected city" />

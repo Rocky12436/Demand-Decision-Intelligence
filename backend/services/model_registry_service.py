@@ -499,26 +499,64 @@ def get_model_performance_dashboard(
         .filter(ForecastEvaluation.dataset_id == target_dataset.id)
         .all()
     )
-    wapes = [float(e.wape or 22.0) for e in evals if e.wape is not None]
-    if not wapes:
-        wapes = [14.2, 16.8, 18.5, 21.0, 22.4, 25.1, 28.0, 31.5, 34.0, 38.2]
+    wapes = [float(e.wape) for e in evals if e.wape is not None]
+    if wapes:
+        wapes_sorted = sorted(wapes)
+        n_w = len(wapes_sorted)
+        distribution = {
+            "min": round(wapes_sorted[0], 1),
+            "p25": round(wapes_sorted[int(n_w * 0.25)], 1),
+            "median": round(wapes_sorted[int(n_w * 0.50)], 1),
+            "p75": round(wapes_sorted[int(n_w * 0.75)], 1),
+            "p90": round(wapes_sorted[int(n_w * 0.90)], 1),
+            "max": round(wapes_sorted[-1], 1),
+            "mean": round(sum(wapes_sorted) / n_w, 1),
+        }
+    else:
+        distribution = {
+            "min": 0.0,
+            "p25": 0.0,
+            "median": 0.0,
+            "p75": 0.0,
+            "p90": 0.0,
+            "max": 0.0,
+            "mean": 0.0,
+        }
 
-    wapes_sorted = sorted(wapes)
-    n_w = len(wapes_sorted)
-    distribution = {
-        "min": round(wapes_sorted[0], 1),
-        "p25": round(wapes_sorted[int(n_w * 0.25)], 1),
-        "median": round(wapes_sorted[int(n_w * 0.50)], 1),
-        "p75": round(wapes_sorted[int(n_w * 0.75)], 1),
-        "p90": round(wapes_sorted[int(n_w * 0.90)], 1),
-        "max": round(wapes_sorted[-1], 1),
-        "mean": round(sum(wapes_sorted) / n_w, 1),
-    }
-
-    # 3. Top 10 worst performing SKUs
+    # 3. Top worst performing SKUs from real evaluations
+    worst_evals = (
+        db.query(ForecastEvaluation, ForecastRun)
+        .join(ForecastRun, ForecastEvaluation.run_id == ForecastRun.id)
+        .filter(ForecastEvaluation.dataset_id == target_dataset.id)
+        .order_by(desc(ForecastEvaluation.wape))
+        .limit(10)
+        .all()
+    )
     worst_skus = [
-        {"product_id": f"SKU-{i+101}", "wape": round(38.0 - i * 1.5, 1), "champion_model": "Naive" if i < 2 else "MovingAverage_7D", "status": "NON_FORECASTABLE" if i < 2 else "HIGH_VARIANCE"}
-        for i in range(5)
+        {
+            "product_id": str(e.product_id),
+            "wape": round(float(e.wape), 1) if e.wape is not None else 0.0,
+            "champion_model": r.model_name or "Baseline",
+            "status": "NON_FORECASTABLE" if (e.wape and e.wape > 50) else "HIGH_VARIANCE"
+        }
+        for e, r in worst_evals
+    ]
+
+    # Accuracy trend from real forecast evaluations
+    trend_rows = (
+        db.query(
+            func.date(ForecastEvaluation.evaluation_date).label("eval_date"),
+            func.avg(ForecastEvaluation.wape).label("avg_wape")
+        )
+        .filter(ForecastEvaluation.dataset_id == target_dataset.id)
+        .group_by(func.date(ForecastEvaluation.evaluation_date))
+        .order_by(func.date(ForecastEvaluation.evaluation_date).asc())
+        .limit(10)
+        .all()
+    )
+    accuracy_trend = [
+        {"date": str(tr.eval_date), "portfolio_wape": round(float(tr.avg_wape), 1)}
+        for tr in trend_rows
     ]
 
     return {
@@ -533,12 +571,6 @@ def get_model_performance_dashboard(
         "total_models_evaluated": total_champions,
         "champion_model_mix": champion_mix,
         "wape_distribution": distribution,
-        "accuracy_trend": [
-            {"date": (date.today() - timedelta(days=28)).isoformat(), "portfolio_wape": 24.8},
-            {"date": (date.today() - timedelta(days=21)).isoformat(), "portfolio_wape": 23.5},
-            {"date": (date.today() - timedelta(days=14)).isoformat(), "portfolio_wape": 21.9},
-            {"date": (date.today() - timedelta(days=7)).isoformat(), "portfolio_wape": 20.2},
-            {"date": date.today().isoformat(), "portfolio_wape": 19.4},
-        ],
+        "accuracy_trend": accuracy_trend,
         "worst_performing_skus": worst_skus,
     }

@@ -97,13 +97,15 @@ export default function OverviewPage() {
     );
   }
 
-  const scoreVal = qualityScore?.composite_score ?? 85.0;
-  const gatePassed = qualityScore?.quality_gate_passed ?? true;
-  const champCount = modelPerf?.total_champions ?? summary?.unique_products ?? 0;
-  const avgWape = modelPerf?.average_wape ?? 14.8;
   const totalUnits = summary?.total_quantity ?? 0;
   const estRevenue = summary?.total_revenue ?? 0;
   const riskAmount = summary?.capital_at_risk ?? 0;
+  const isZeroState = totalUnits === 0 && estRevenue === 0 && (!summary?.unique_products || summary?.unique_products === 0);
+
+  const scoreVal = isZeroState ? 0 : (qualityScore?.composite_score ?? 0);
+  const gatePassed = isZeroState ? false : (qualityScore?.quality_gate_passed ?? false);
+  const champCount = isZeroState ? 0 : (modelPerf?.total_champions ?? summary?.unique_products ?? 0);
+  const avgWape = isZeroState ? 0 : (modelPerf?.average_wape ?? 0);
 
   // Table columns for Products to reorder now
   const tableColumns = [
@@ -212,8 +214,40 @@ export default function OverviewPage() {
         }
       />
 
+      {/* Zero State Alert Banner */}
+      {isZeroState && (
+        <div style={{
+          padding: '24px',
+          backgroundColor: 'var(--surface-card, #ffffff)',
+          border: '1px solid var(--border-color, #e2e8f0)',
+          borderRadius: '12px',
+          marginBottom: '24px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '20px',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
+        }}>
+          <div>
+            <h3 style={{ margin: '0 0 6px 0', fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>
+              No Sales Data Uploaded Yet
+            </h3>
+            <p style={{ margin: 0, fontSize: '14px', color: 'var(--text-muted)' }}>
+              Upload your retail sales CSV file to automatically calculate demand forecasts, stock health indicators, and policy recommendations.
+            </p>
+          </div>
+          <button
+            onClick={() => navigate('/upload')}
+            className="diq-btn diq-btn-primary"
+            style={{ whiteSpace: 'nowrap' }}
+          >
+            <Download size={16} /> Upload Sales CSV
+          </button>
+        </div>
+      )}
+
       {/* AI Dukaan Daily Voice Briefing & WhatsApp Reorder */}
-      <StoreDailyBriefing />
+      {!isZeroState && <StoreDailyBriefing />}
 
       {/* 2. Top "What you need to know" Alert Banner */}
       {criticalSkus.length > 0 && (
@@ -241,10 +275,10 @@ export default function OverviewPage() {
           label="Expected Sales"
           tooltip="Estimated sales revenue across all products based on active demand projections."
           value={formatINR(estRevenue, { compact: true })}
-          trend="+4.2% trajectory"
-          trendDirection="up"
-          trendPositive={true}
-          subtext={`across ${formatNumber(totalUnits, { compact: true })} units`}
+          trend={isZeroState ? "Awaiting data" : "+4.2% trajectory"}
+          trendDirection={isZeroState ? undefined : "up"}
+          trendPositive={!isZeroState}
+          subtext={isZeroState ? "0 sales transactions" : `across ${formatNumber(totalUnits, { compact: true })} units`}
           icon={TrendingUp}
         />
 
@@ -253,10 +287,10 @@ export default function OverviewPage() {
           label="Sales at Risk"
           tooltip="Estimated revenue threatened because fast-selling products are dangerously close to running out."
           value={formatINR(riskAmount, { compact: true })}
-          trend={`${criticalSkus.length} items critical`}
-          trendDirection="down"
-          trendPositive={false}
-          subtext="immediate orders needed"
+          trend={isZeroState ? "No risk detected" : `${criticalSkus.length} items critical`}
+          trendDirection={isZeroState ? undefined : "down"}
+          trendPositive={isZeroState}
+          subtext={isZeroState ? "0 items critical" : "immediate orders needed"}
           icon={AlertOctagon}
           onClick={() => navigate('/inventory')}
         />
@@ -265,11 +299,11 @@ export default function OverviewPage() {
         <StatCard
           label="Forecast Reliability"
           tooltip="Overall forecasting accuracy across all products. Higher is better."
-          value={formatPercent(100 - avgWape)}
-          trend={isTechnical ? `Avg WAPE: ${avgWape}%` : 'High confidence'}
-          trendDirection="up"
-          trendPositive={true}
-          subtext={`${champCount} best methods active`}
+          value={isZeroState ? "N/A" : formatPercent(100 - avgWape)}
+          trend={isZeroState ? "No models evaluated" : (isTechnical ? `Avg WAPE: ${avgWape}%` : 'High confidence')}
+          trendDirection={isZeroState ? undefined : "up"}
+          trendPositive={!isZeroState}
+          subtext={isZeroState ? "0 models active" : `${champCount} best methods active`}
           icon={Cpu}
           onClick={() => navigate('/model-performance')}
         />
@@ -279,10 +313,10 @@ export default function OverviewPage() {
           label="Data Health Score"
           tooltip="Automated data audit score out of 100 checking for missing dates, errors, and price anomalies."
           value={`${scoreVal} / 100`}
-          trend={gatePassed ? 'Data is reliable' : 'Cleanup recommended'}
-          trendDirection={gatePassed ? 'up' : 'down'}
+          trend={isZeroState ? 'Awaiting CSV upload' : (gatePassed ? 'Data is reliable' : 'Cleanup recommended')}
+          trendDirection={isZeroState ? undefined : (gatePassed ? 'up' : 'down')}
           trendPositive={gatePassed}
-          subtext="10 automated checks"
+          subtext={isZeroState ? "No dataset uploaded" : "10 automated checks"}
           icon={ShieldCheck}
           onClick={() => navigate('/quality')}
         />
