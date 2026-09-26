@@ -137,7 +137,7 @@ export default function StoreDailyBriefing() {
   };
 
   const currentScript = briefingData?.scripts?.[language] || '';
-  const healthScore = briefingData?.health_score || 85;
+  const healthScore = briefingData?.total_skus === 0 ? 0 : (briefingData?.health_score ?? 0);
 
   return (
     <div
@@ -443,7 +443,7 @@ export default function StoreDailyBriefing() {
                 Supplier Reorder List (WhatsApp)
               </div>
               <div style={{ fontSize: '11px', color: '#047857' }}>
-                {briefingData?.critical_count || 3} items ka ready message bhejo
+                {briefingData?.critical_count || 0} items ka ready message bhejo
               </div>
             </div>
             <button
