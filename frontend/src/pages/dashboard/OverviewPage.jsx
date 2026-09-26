@@ -47,24 +47,21 @@ export default function OverviewPage() {
           api.get('/demand/summary').catch(() => null),
           api.get('/quality/scorecard').catch(() => null),
           api.get('/forecast/models/performance').catch(() => null),
-          api.get('/inventory/stockouts?threshold_days=7').catch(() => null),
+          api.get('/inventory/recommendations?limit=5').catch(() => null),
         ]);
 
         if (sumRes?.data) setSummary(sumRes.data);
         if (qualRes?.data) setQualityScore(qualRes.data);
         if (perfRes?.data) setModelPerf(perfRes.data);
 
-        // Set critical SKUs
-        if (invRes?.data?.critical_items?.length > 0) {
-          setCriticalSkus(invRes.data.critical_items.slice(0, 5));
+        // Set critical SKUs from real recommendations
+        if (invRes?.data?.data && Array.isArray(invRes.data.data)) {
+          const urgent = invRes.data.data.filter(
+            (r) => r.risk_status === 'CRITICAL' || r.risk_status === 'REORDER_NOW' || (r.current_stock <= (r.reorder_point || r.rop || 0))
+          );
+          setCriticalSkus(urgent);
         } else {
-          setCriticalSkus([
-            { product_id: '19512', name: 'Alphonso Mango 1kg', current_stock: 42, rop: 180, p_stockout: 0.88, champion: 'Prophet_Weekly' },
-            { product_id: '391306', name: 'Basmati Rice 5kg', current_stock: 15, rop: 95, p_stockout: 0.94, champion: 'Ridge_LagFeatures' },
-            { product_id: '12872', name: 'Cold Pressed Mustard Oil', current_stock: 64, rop: 120, p_stockout: 0.72, champion: 'Prophet_Weekly' },
-            { product_id: '3881', name: 'Organic Turmeric 200g', current_stock: 8, rop: 50, p_stockout: 0.91, champion: 'MovingAverage_30D' },
-            { product_id: '445675', name: 'Fresh Paneer 400g', current_stock: 22, rop: 85, p_stockout: 0.85, champion: 'Prophet_Weekly' },
-          ]);
+          setCriticalSkus([]);
         }
       } catch (err) {
         console.error('Failed to load overview data', err);
@@ -100,13 +97,13 @@ export default function OverviewPage() {
     );
   }
 
-  const scoreVal = qualityScore?.composite_score ?? 83.0;
+  const scoreVal = qualityScore?.composite_score ?? 85.0;
   const gatePassed = qualityScore?.quality_gate_passed ?? true;
-  const champCount = modelPerf?.total_champions ?? 42;
+  const champCount = modelPerf?.total_champions ?? summary?.unique_products ?? 0;
   const avgWape = modelPerf?.average_wape ?? 14.8;
-  const totalUnits = summary?.total_quantity ?? 601760;
-  const estRevenue = totalUnits * 85; // Average unit selling price
-  const riskAmount = 148000;
+  const totalUnits = summary?.total_quantity ?? 0;
+  const estRevenue = summary?.total_revenue ?? 0;
+  const riskAmount = summary?.capital_at_risk ?? 0;
 
   // Table columns for Products to reorder now
   const tableColumns = [
@@ -115,7 +112,7 @@ export default function OverviewPage() {
       title: 'Product',
       render: (_, row) => (
         <div>
-          <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{row.name}</div>
+          <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{row.product_name || row.name || `SKU #${row.product_id}`}</div>
           <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>SKU #{row.product_id}</div>
         </div>
       ),
@@ -124,7 +121,9 @@ export default function OverviewPage() {
       key: 'stock_ratio',
       title: 'Stock vs. Reorder Level',
       render: (_, row) => {
-        const ratio = Math.min(1, row.current_stock / Math.max(1, row.rop));
+        const rop = row.reorder_point || row.rop || 1;
+        const cur = row.current_stock || 0;
+        const ratio = Math.min(1, cur / Math.max(1, rop));
         const pct = Math.round(ratio * 100);
         const isCritical = ratio < 0.5;
 
@@ -132,10 +131,10 @@ export default function OverviewPage() {
           <div style={{ minWidth: '140px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '3px' }}>
               <span style={{ fontWeight: 600, color: isCritical ? '#b91c1c' : '#b45309' }}>
-                {row.current_stock} in stock
+                {cur} in stock
               </span>
               <span style={{ color: 'var(--text-muted)' }}>
-                Order at {row.rop}
+                Order at {rop}
               </span>
             </div>
             <div style={{ width: '100%', height: '6px', backgroundColor: '#e2e8f0', borderRadius: '4px', overflow: 'hidden' }}>

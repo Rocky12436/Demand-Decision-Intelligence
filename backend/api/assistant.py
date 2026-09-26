@@ -199,7 +199,7 @@ def get_daily_briefing(
         db.query(func.sum(DailyProductDemand.total_quantity))
         .filter(DailyProductDemand.dataset_id == target_dataset.id)
         .scalar()
-    ) or 601760
+    ) or 0
 
     critical_recs = (
         db.query(InventoryRecommendation)
@@ -212,52 +212,70 @@ def get_daily_briefing(
     critical_items = []
     if critical_recs:
         for rec in critical_recs:
-            p = db.query(Product).filter(Product.id == rec.product_id).first()
-            p_name = p.name if p else f"SKU #{rec.product_id}"
+            p = db.query(Product).filter(Product.product_id == str(rec.product_id)).first()
+            p_name = p.product_name if p and p.product_name else f"SKU #{rec.product_id}"
             critical_items.append({
-                "product_id": rec.product_id,
+                "product_id": str(rec.product_id),
                 "name": p_name,
                 "reorder_qty": int(getattr(rec, "recommended_order_qty", 50) or 50),
                 "risk_status": getattr(rec, "risk_status", "CRITICAL"),
             })
+
+    if critical_items:
+        item_names = [it["name"] for it in critical_items[:3]]
+        item_names_str = ", ".join(item_names)
+        health_score = max(72, min(96, int(100 - (len(critical_items) * 4.5))))
+
+        hinglish_text = (
+            f"Namaste! Aaj ki store summary: Aapki dukaan me kul {int(total_units):,} units ki sale record hui hai. "
+            f"Alert: {len(critical_items)} zaroori items jaise {item_names_str} ka stock khatam hone ki kagar par hai. "
+            f"Bikri me kisi bhi nuksan se bachne ke liye naya order abhi supplier ko bhej dein. "
+            f"Aapka overall store health score {health_score} percent hai."
+        )
+
+        hindi_text = (
+            f"नमस्ते! आज की दुकान की ताज़ा रिपोर्ट: आपकी दुकान में कुल {int(total_units):,} यूनिट्स की बिक्री दर्ज की गई है। "
+            f"ध्यान दें, {len(critical_items)} मुख्य उत्पाद जैसे {item_names_str} का स्टॉक बहुत जल्द समाप्त होने वाला है। "
+            f"बिक्री में रुकावट से बचने के लिए तुरंत नया ऑर्डर भेजें। आपकी स्टोर की स्वास्थ्य दर {health_score} प्रतिशत है।"
+        )
+
+        english_text = (
+            f"Hello! Here is today's store briefing: Total recorded sales reached {int(total_units):,} units. "
+            f"Alert: {len(critical_items)} critical items including {item_names_str} are running low on stock. "
+            f"Place replenishment purchase orders promptly to avoid losing sales. "
+            f"Overall inventory health score is {health_score}%."
+        )
+
+        po_lines = "\n".join([f"- {it['name']}: {it['reorder_qty']} units (Urgent)" for it in critical_items])
+        whatsapp_msg = (
+            f"Namaste Ji,\n\n"
+            f"*DemandIQ Store Reorder List:*\n"
+            f"{po_lines}\n\n"
+            f"Kripya kal tak delivery karwa dein. Dhanyawad!"
+        )
     else:
-        critical_items = [
-            {"product_id": "19512", "name": "Alphonso Mango 1kg", "reorder_qty": 60, "p_stockout": 0.88},
-            {"product_id": "391306", "name": "Basmati Rice 5kg", "reorder_qty": 40, "p_stockout": 0.94},
-            {"product_id": "12872", "name": "Cold Pressed Mustard Oil 1L", "reorder_qty": 75, "p_stockout": 0.72},
-        ]
-
-    item_names = [it["name"] for it in critical_items[:3]]
-    item_names_str = ", ".join(item_names)
-    health_score = max(72, min(96, int(100 - (len(critical_items) * 4.5))))
-
-    hinglish_text = (
-        f"Namaste! Aaj ki store summary: Aapki dukaan me kul {int(total_units):,} units ki sale record hui hai. "
-        f"Alert: {len(critical_items)} zaroori items jaise {item_names_str} ka stock khatam hone ki kagar par hai. "
-        f"Bikri me kisi bhi nuksan se bachne ke liye naya order abhi supplier ko bhej dein. "
-        f"Aapka overall store health score {health_score} percent hai."
-    )
-
-    hindi_text = (
-        f"नमस्ते! आज की दुकान की ताज़ा रिपोर्ट: आपकी दुकान में कुल {int(total_units):,} यूनिट्स की बिक्री दर्ज की गई है। "
-        f"ध्यान दें, {len(critical_items)} मुख्य उत्पाद जैसे {item_names_str} का स्टॉक बहुत जल्द समाप्त होने वाला है। "
-        f"बिक्री में रुकावट से बचने के लिए तुरंत नया ऑर्डर भेजें। आपकी स्टोर की स्वास्थ्य दर {health_score} प्रतिशत है।"
-    )
-
-    english_text = (
-        f"Hello! Here is today's store briefing: Total recorded sales reached {int(total_units):,} units. "
-        f"Alert: {len(critical_items)} critical items including {item_names_str} are running low on stock. "
-        f"Place replenishment purchase orders promptly to avoid losing sales. "
-        f"Overall inventory health score is {health_score}%."
-    )
-
-    po_lines = "\n".join([f"- {it['name']}: {it['reorder_qty']} units (Urgent)" for it in critical_items])
-    whatsapp_msg = (
-        f"Namaste Ji,\n\n"
-        f"*DemandIQ Store Reorder List:*\n"
-        f"{po_lines}\n\n"
-        f"Kripya kal tak delivery karwa dein. Dhanyawad!"
-    )
+        health_score = 96
+        hinglish_text = (
+            f"Namaste! Aaj ki store summary: Aapki dukaan me kul {int(total_units):,} units ki sale record hui hai. "
+            f"Dukaan me sabhi monitored items ka stock abhi safe levels par hai aur koi critical stockout risk nahi hai. "
+            f"Aapka overall store health score {health_score} percent hai."
+        )
+        hindi_text = (
+            f"नमस्ते! आज की दुकान की ताज़ा रिपोर्ट: आपकी दुकान में कुल {int(total_units):,} यूनिट्स की बिक्री दर्ज की गई है। "
+            f"दुकान में सभी उत्पादों का स्टॉक अभी सुरक्षित स्तर पर है। दुकान का हेल्थ स्कोर {health_score} प्रतिशत है।"
+        )
+        english_text = (
+            f"Hello! Today's store briefing: Total recorded sales volume is {int(total_units):,} units. "
+            f"All inventory buffers are operating within safe reorder thresholds with zero critical stockouts detected. "
+            f"Overall store health score is {health_score}%."
+        )
+        whatsapp_msg = (
+            f"Namaste Ji,\n\n"
+            f"*DemandIQ Store Daily Update:*\n"
+            f"• Total Recorded Demand: {int(total_units):,} units\n"
+            f"• Stock Health: All buffers optimal (No urgent reorders needed today)\n\n"
+            f"Dhanyawad!"
+        )
 
     return {
         "status": "success",
