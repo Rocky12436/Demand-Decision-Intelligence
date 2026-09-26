@@ -23,6 +23,7 @@ import {
   Layers,
   History,
   Download,
+  Activity,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import api, { recomputeForecast } from '../../services/api';
