@@ -61,7 +61,7 @@ export default function DataTable({
                   ...col.headerStyle,
                 }}
               >
-                {col.title}
+                {col.title || col.label}
               </th>
             ))}
           </tr>
@@ -106,7 +106,16 @@ export default function DataTable({
                 >
                   {columns.map((col, colIdx) => {
                     const isNum = col.isNumeric || col.align === 'right';
-                    const val = col.render ? col.render(row[col.key], row, rowIdx) : row[col.key];
+                    let val;
+                    if (col.render) {
+                      try {
+                        val = col.render(row[col.key], row, rowIdx);
+                      } catch {
+                        val = col.render(row, row, rowIdx);
+                      }
+                    } else {
+                      val = row[col.key];
+                    }
 
                     return (
                       <td
