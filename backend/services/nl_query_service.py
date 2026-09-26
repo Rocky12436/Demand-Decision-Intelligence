@@ -12,6 +12,7 @@ Enforces safety: DO NOT let an LLM write free SQL against the database.
 """
 
 import re
+import unicodedata
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
@@ -22,7 +23,7 @@ from sqlalchemy import func, desc, or_
 from backend.models.demand import DailyProductDemand
 from backend.models.product import Product
 from backend.models.inventory import InventoryRecommendation, InventoryState
-from backend.models.procurement import SupplierProduct, PurchaseOrder
+from backend.models.procurement import SupplierProduct, PurchaseOrder, PurchaseOrderLine, Supplier
 from backend.models.market_price import CommodityMapping, PriceObservation
 from backend.models.dead_stock import DeadStockRecord
 from backend.models.calendar import CalendarEvent
@@ -55,6 +56,195 @@ class ParsedQueryIntent(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
+def detect_query_language(query_text: str) -> str:
+    """
+    Detects if the user's query is in Hindi/Hinglish or English.
+    Returns 'hi' for Hindi/Hinglish, 'en' for English.
+    """
+    q = query_text.strip()
+    # Check for Devanagari script characters
+    devanagari_count = sum(1 for ch in q if '\u0900' <= ch <= '\u097F')
+    if devanagari_count >= 2:
+        return 'hi'
+    # Check for common Hindi/Hinglish words
+    q_lower = q.lower()
+    
+    # Strong single-word Hindi indicators that immediately signify Hindi/Hinglish
+    strong_markers = [
+        'namaste', 'kaise', 'batao', 'bataiye', 'bata', 'chahiye', 'khatam', 'khatm',
+        'fasa', 'bikri', 'saman', 'dukaan', 'paisa', 'munafa', 'fayda', 'faida',
+        'karein', 'kare', 'karo', 'hoga', 'hogi', 'hona', 'kisko', 'kaunsa',
+        'kitna', 'kitni', 'kitne', 'sabse', 'zyada', 'jyada', 'suniye', 'sunao',
+        'mangwana', 'kharidna', 'bechna', 'sasta', 'mehenga', 'chhoot', 'bhav'
+    ]
+    if any(re.search(r'\b' + re.escape(w) + r'\b', q_lower) for w in strong_markers):
+        return 'hi'
+
+    hindi_markers = [
+        'kya', 'kaise', 'kisko', 'kitna', 'kitni', 'kitne', 'kaunsa', 'kaun',
+        'mujhe', 'batao', 'dikhao', 'bata', 'dikha', 'hai', 'hain', 'nahi',
+        'sabse', 'jyada', 'zyada', 'kam', 'wala', 'wale', 'wali',
+        'dukaan', 'saman', 'paisa', 'bikri', 'order', 'karo', 'kare',
+        'mangwana', 'kharidna', 'bechna', 'stock', 'maal', 'cheez',
+        'aaj', 'kal', 'abhi', 'pehle', 'baad', 'mahina', 'hafta',
+        'reorder', 'khatam', 'fasa', 'bhejo', 'sunao', 'suniye',
+        'accha', 'theek', 'sahi', 'galat', 'zaroor', 'zaroori',
+        'chahiye', 'karein', 'hoga', 'hogi', 'hona', 'kuch', 'meri',
+        'mera', 'apna', 'apne', 'bhi', 'ab', 'se', 'me', 'mein',
+        'par', 'ko', 'ki', 'ka', 'ke', 'aur', 'toh', 'taaki', 'namaste'
+    ]
+    matches = sum(1 for word in hindi_markers if re.search(r'\b' + re.escape(word) + r'\b', q_lower))
+    if matches >= 1:
+        return 'hi'
+    return 'en'
+
+
+def make_hinglish_prose(template_name: str, data: dict) -> str:
+    """
+    Generates a simple Hinglish prose response for non-technical users.
+    data dict contains template-specific values needed for the prose.
+    """
+    tpl = template_name
+
+    if tpl == "stockout_risk_before":
+        count = data.get('count', 0)
+        target_date = data.get('target_date', '')
+        days_ahead = data.get('days_ahead', 30)
+        top_skus = data.get('top_skus', '')
+        if count > 0:
+            return (
+                f"⚠️ Alert: {count} items ka stock {target_date} se pehle khatam ho jayega ({days_ahead} din baaki hain). "
+                f"Sabse zyada urgent items hain: {top_skus}. "
+                f"Inke liye abhi order dena zaroori hai, nahi toh bikri ruk jayegi."
+            )
+        return f"✅ Acchi baat hai! Sabhi items ka stock {target_date} tak sufficient hai. Koi chinta nahi."
+
+    elif tpl == "dead_stock":
+        total_capital = data.get('total_capital', 0)
+        count = data.get('count', 0)
+        days = data.get('days_threshold', 90)
+        monthly = data.get('monthly_storage', 0)
+        return (
+            f"📦 Aapke paas {count} items hain jo {days}+ din se nahi bike. "
+            f"In mein ₹{total_capital:,.0f} ka paisa fasa hua hai. "
+            f"Har mahine ₹{monthly:,.0f} ka storage kharcha bhi lag raha hai. "
+            f"Inhe discount pe bechna ya supplier ko return karna best rahega."
+        )
+
+    elif tpl == "items_below_rop":
+        count = data.get('count', 0)
+        if count > 0:
+            return (
+                f"🔴 Abhi {count} items ka stock Reorder Level se neeche hai. "
+                f"Matlab ye items jaldi khatam ho sakte hain. "
+                f"Inke liye turant naya order supplier ko bhejein."
+            )
+        return "✅ Badhiya! Abhi kisi bhi item ka stock Reorder Level se neeche nahi hai. Sab theek chal raha hai."
+
+    elif tpl == "top_n_by":
+        n = data.get('n', 10)
+        metric = data.get('metric', 'demand')
+        top_sku = data.get('top_sku', 'N/A')
+        top_value = data.get('top_value', 0)
+        metric_hindi = 'bikri' if metric == 'demand' else ('kamai' if metric == 'revenue' else metric)
+        return (
+            f"📊 Ye hain aapke top {n} sabse zyada {metric_hindi} wale products. "
+            f"#1 pe hai {top_sku} jiske {top_value:,.0f} units bike. "
+            f"In products ka stock hamesha ready rakhein."
+        )
+
+    elif tpl == "price_movers":
+        count = data.get('count', 0)
+        thresh = data.get('threshold', 5)
+        return (
+            f"📈 {count} items ke daam {thresh}%+ badh rahe hain. "
+            f"Agar zaroorat ho toh abhi advance mein khareed lo, baad mein aur mehenga hoga. "
+            f"Neeche table mein details hain."
+        )
+
+    elif tpl == "demand_for":
+        sku = data.get('sku', '')
+        total_qty = data.get('total_qty', 0)
+        avg_qty = data.get('avg_qty', 0)
+        days = data.get('days', 0)
+        return (
+            f"📋 SKU {sku} ki pichle {days} din ki bikri: Total {total_qty:,.0f} units "
+            f"(roz average {avg_qty:.1f} units). "
+            f"Is hisaab se stock plan karein."
+        )
+
+    elif tpl == "forecast_accuracy_for":
+        sku = data.get('sku', '')
+        best_model = data.get('best_model', 'N/A')
+        wape = data.get('wape', None)
+        wape_str = f" (accuracy: {100 - wape:.1f}%)" if wape else ""
+        return (
+            f"🎯 SKU {sku} ke liye sabse accha prediction model hai: {best_model}{wape_str}. "
+            f"Is model ki prediction ke hisaab se stock rakhein toh nuksan kam hoga."
+        )
+
+    elif tpl == "bot_help_and_overview":
+        return (
+            "👋 Namaste! Main aapka **DemandIQ Copilot** hoon.\n\n"
+            "Aap mujhse apni dukaan ke baare mein kuch bhi puch sakte hain:\n"
+            "• **Stock khatam hoga kya?** — 'Kaunsa saman Diwali se pehle khatam hoga?'\n"
+            "• **Reorder karna hai** — 'Kisko reorder karna chahiye?'\n"
+            "• **Dead stock** — 'Kitna paisa fasa hua hai jo nahi bik raha?'\n"
+            "• **Top bikri** — 'Sabse zyada kya bik raha hai?'\n"
+            "• **Daam badh rahe** — 'Kaunse saman ke daam badh rahe hain?'\n"
+            "• **Overall status** — 'Meri dukaan kaise chal rahi hai?'"
+        )
+
+    elif tpl == "executive_kpi_summary":
+        total = data.get('total_products', 0)
+        rop = data.get('rop_breaches', 0)
+        dead = data.get('dead_stock_capital', 0)
+        pos = data.get('active_pos', 0)
+        po_spend = data.get('po_spend', 0)
+        return (
+            f"📊 **Aapki Dukaan ki Summary:**\n"
+            f"• **Total Products:** {total} items track ho rahe hain\n"
+            f"• **Stock Kam Hai:** {rop} items mein stock bahut kam hai, turant order karna chahiye\n"
+            f"• **Paisa Fasa Hai:** ₹{float(dead):,.0f} ka maal pada hai jo bik nahi raha\n"
+            f"• **Orders Chalte Hain:** {pos} orders abhi suppliers ke paas hain (₹{float(po_spend):,.0f})\n\n"
+            f"💡 Sabse pehle kam stock wale items ka order bhejein aur dead stock pe discount lagaein."
+        )
+
+    elif tpl == "supplier_po_summary":
+        count = data.get('count', 0)
+        total_spend = data.get('total_spend', 0)
+        return (
+            f"📋 Aapke {count} recent Purchase Orders hain, total ₹{total_spend:,.0f} ka. "
+            f"Neeche table mein har order ki detail hai - status, delivery date, aur amount."
+        )
+
+    elif tpl == "upcoming_festivals":
+        count = data.get('count', 0)
+        return (
+            f"🎉 Aane wale {count} festivals/holidays ki list neeche hai. "
+            f"In tyohaaron se pehle stock badha lo taaki bikri miss na ho. "
+            f"Suppliers ko advance mein order bhejo."
+        )
+
+    elif tpl == "model_benchmarks":
+        count = data.get('count', 0)
+        return (
+            f"🤖 {count} AI prediction models ki performance neeche hai. "
+            f"Sabse acche models ko system automatically use karta hai stock planning ke liye."
+        )
+
+    elif tpl == "inventory_health_overview":
+        count = data.get('count', 0)
+        return (
+            f"📦 {count} items ki stock health neeche di gayi hai. "
+            f"Jinpe 'CRITICAL' ya 'WARNING' likha hai unka turant order dein. "
+            f"Baaki items ka stock abhi safe hai."
+        )
+
+    # Fallback
+    return "Query ka jawab mil gaya hai. Neeche table mein details dekhein."
+
+
 def parse_natural_language_intent(query_text: str) -> Optional[ParsedQueryIntent]:
     """
     Parses a user question into a validated query template intent.
@@ -62,13 +252,31 @@ def parse_natural_language_intent(query_text: str) -> Optional[ParsedQueryIntent
     """
     q = query_text.lower().strip()
 
+    # 4. Items below ROP / Reorder (Checked early to catch speech transcripts like 'किसकी रिकॉर्डर काम है')
+    # e.g., "Which items are below ROP?", "What should I reorder now?", "किसकी रिकॉर्डर काम है", "kisko reorder kare"
+    if any(k in q for k in [
+        "below rop", "reorder", "under reorder point", "re-order", "rop",
+        "रिकॉर्डर", "रिकार्डर", "रीऑर्डर", "रिऑर्डर", "कम है", "काम है",
+        "kisko reorder", "kiska reorder", "reorder level", "kya order",
+        "kya mangwana", "kya kharidna", "kisko mangwana", "order list",
+        "stock kam", "स्टॉक कम", "maal kam", "kam stock", "order karna hai",
+        "order kiska", "order kisko", "reorder karna", "reorder point"
+    ]):
+        return ParsedQueryIntent(
+            template_name="items_below_rop",
+            parameters={},
+            confidence=0.92
+        )
+
     # 1. Stockout risk before date / festival
-    # e.g., "Which SKUs will stock out before Diwali?", "What items will run out before 2024-11-01?"
-    if any(k in q for k in ["stock out", "stockout", "run out"]) and any(k in q for k in ["before", "by", "prior"]):
+    # e.g., "Which SKUs will stock out before Diwali?", "What items will run out before 2024-11-01?", "kaunsa saman khatam hoga"
+    if any(k in q for k in ["stock out", "stockout", "run out", "khatam", "khatm", "खत्म", "आउट ऑफ स्टॉक"]) or (
+        any(k in q for k in ["diwali", "eid", "दिवाली", "त्योहार", "festival"]) and any(k in q for k in ["out", "risk", "khatam", "खत्म", "stock", "स्टॉक"])
+    ):
         target = "diwali"
-        if "diwali" in q:
+        if any(k in q for k in ["diwali", "दिवाली"]):
             target = "2024-11-01"
-        elif "eid" in q:
+        elif any(k in q for k in ["eid", "ईद"]):
             target = "2024-04-11"
         else:
             # Look for YYYY-MM-DD
@@ -82,8 +290,8 @@ def parse_natural_language_intent(query_text: str) -> Optional[ParsedQueryIntent
         )
 
     # 2. Dead stock / capital locked up
-    # e.g., "What's my total capital tied up in dead stock?", "Show dead stock"
-    if any(k in q for k in ["dead stock", "deadstock", "slow moving", "capital tied up", "obsolete"]):
+    # e.g., "What's my total capital tied up in dead stock?", "Show dead stock", "kitna paisa fasa hai"
+    if any(k in q for k in ["dead stock", "deadstock", "slow moving", "capital tied up", "obsolete", "fasa", "paisa fasa", "फंसा", "पैसा"]):
         days = 90
         m = re.search(r'(\d+)\s*days?', q)
         if m:
@@ -95,19 +303,19 @@ def parse_natural_language_intent(query_text: str) -> Optional[ParsedQueryIntent
         )
 
     # 3. Top N by metric
-    # e.g., "Show me the top 10 SKUs by forecast error last month", "Top 5 products by demand"
-    if "top" in q:
+    # e.g., "Show me the top 10 SKUs by forecast error last month", "Top 5 products by demand", "sabse jyada bikne wale"
+    if any(k in q for k in ["top", "sabse jyada", "sabse zyada", "सबसे ज्यादा", "सबसे अधिक", "best selling", "bikri"]):
         n = 10
-        m_n = re.search(r'top\s*(\d+)', q)
+        m_n = re.search(r'(?:top|सबसे ज्यादा)\s*(\d+)', q)
         if m_n:
             n = int(m_n.group(1))
 
         metric = "demand"
         if any(k in q for k in ["error", "wape", "inaccurate"]):
             metric = "forecast_error"
-        elif any(k in q for k in ["sales", "volume", "quantity"]):
+        elif any(k in q for k in ["sales", "volume", "quantity", "bikri", "बिक्री"]):
             metric = "demand"
-        elif any(k in q for k in ["revenue", "value", "cost"]):
+        elif any(k in q for k in ["revenue", "value", "cost", "kamai", "कमाई"]):
             metric = "revenue"
         elif any(k in q for k in ["stockout", "risk"]):
             metric = "stockout_risk"
@@ -118,18 +326,9 @@ def parse_natural_language_intent(query_text: str) -> Optional[ParsedQueryIntent
             confidence=0.92
         )
 
-    # 4. Items below ROP / Reorder
-    # e.g., "Which items are below ROP?", "What should I reorder now?"
-    if any(k in q for k in ["below rop", "reorder", "under reorder point", "stockout risk"]):
-        return ParsedQueryIntent(
-            template_name="items_below_rop",
-            parameters={},
-            confidence=0.90
-        )
-
     # 5. Price movers / rising commodity prices / forward buy
     # e.g., "Which products should I buy now given prices are rising?", "Price movers"
-    if any(k in q for k in ["prices are rising", "price rising", "price mover", "forward buy", "price surge", "commodities"]):
+    if any(k in q for k in ["prices are rising", "price rising", "price mover", "forward buy", "price surge", "commodities", "kimat", "keemat", "दाम बढ़ रहे"]):
         return ParsedQueryIntent(
             template_name="price_movers",
             parameters={"direction": "rising", "threshold_pct": 5.0},
@@ -273,10 +472,15 @@ def execute_guarded_template(
             )
         else:
             prose = f"All active SKUs have sufficient stock to cover demand through {target_date.isoformat()}."
+            top_skus = ""
+
+        # Store Hinglish data for language-aware response
+        _hinglish_data = {'count': count, 'target_date': target_date.isoformat(), 'days_ahead': days_ahead, 'top_skus': top_skus}
 
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, _hinglish_data),
             "table": {
                 "columns": ["product_id", "current_stock", "avg_daily_demand", "days_of_supply", "stockout_projected_date", "recommended_reorder"],
                 "rows": table_rows,
@@ -320,6 +524,7 @@ def execute_guarded_template(
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, {'total_capital': total_capital, 'count': len(ds_records), 'days_threshold': days_thresh, 'monthly_storage': total_monthly_storage}),
             "table": {
                 "columns": ["product_id", "on_hand", "capital_tied_up", "monthly_holding_cost", "days_without_sales", "recommended_action", "optimal_discount_pct"],
                 "rows": table_rows,
@@ -357,6 +562,7 @@ def execute_guarded_template(
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, {'count': len(recs)}),
             "table": {
                 "columns": ["product_id", "current_stock", "reorder_point", "safety_stock", "recommended_order_qty", "priority", "risk_status"],
                 "rows": table_rows,
@@ -374,7 +580,7 @@ def execute_guarded_template(
             DailyProductDemand.product_id,
             func.sum(DailyProductDemand.total_quantity).label("total_demand"),
             func.avg(DailyProductDemand.total_quantity).label("avg_demand"),
-            func.sum(DailyProductDemand.total_amount).label("total_revenue"),
+            func.sum(DailyProductDemand.total_sales_value).label("total_revenue"),
         ).filter(DailyProductDemand.dataset_id == target_dataset.id).group_by(DailyProductDemand.product_id)
 
         if metric == "revenue":
@@ -403,6 +609,7 @@ def execute_guarded_template(
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, {'n': len(rows), 'metric': metric, 'top_sku': table_rows[0]['product_id'] if table_rows else 'N/A', 'top_value': table_rows[0]['total_demand'] if table_rows else 0}),
             "table": {
                 "columns": ["rank", "product_id", "total_demand", "avg_daily_demand", "total_revenue"],
                 "rows": table_rows,
@@ -439,6 +646,7 @@ def execute_guarded_template(
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, {'count': len(table_rows), 'threshold': thresh}),
             "table": {
                 "columns": ["commodity", "market", "price", "price_change_pct", "trend", "action"],
                 "rows": table_rows,
@@ -482,6 +690,7 @@ def execute_guarded_template(
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, {'sku': sku_id, 'total_qty': total_qty, 'avg_qty': avg_qty, 'days': len(demands)}),
             "table": {
                 "columns": ["product_id", "date", "units_sold", "revenue", "city_name"],
                 "rows": table_rows,
@@ -510,8 +719,12 @@ def execute_guarded_template(
             for e in evals
         ]
 
+        best_model_name = 'N/A'
+        best_wape = None
         if table_rows:
             best_model = min(evals, key=lambda x: x.wape if x.wape is not None else 999.0)
+            best_model_name = best_model.model_name
+            best_wape = best_model.wape
             prose = (
                 f"Forecast accuracy for SKU {sku_id}: Evaluated across {len(evals)} benchmarked models. "
                 f"Top performing model is {best_model.model_name} with WAPE of "
@@ -523,6 +736,7 @@ def execute_guarded_template(
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, {'sku': sku_id, 'best_model': best_model_name, 'wape': best_wape}),
             "table": {
                 "columns": ["model_name", "wape", "mape", "rmse", "mae", "evaluated_at"],
                 "rows": table_rows,
@@ -555,6 +769,7 @@ def execute_guarded_template(
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, {}),
             "table": {
                 "columns": ["category", "sample_prompt", "description"],
                 "rows": capabilities,
@@ -601,6 +816,7 @@ def execute_guarded_template(
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, {'total_products': total_products, 'rop_breaches': rop_breaches, 'dead_stock_capital': dead_stock_capital, 'active_pos': active_pos, 'po_spend': po_spend}),
             "table": {
                 "columns": ["metric", "value", "status", "impact"],
                 "rows": kpi_rows,
@@ -636,6 +852,7 @@ def execute_guarded_template(
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, {'count': len(pos), 'total_spend': total_spend}),
             "table": {
                 "columns": ["po_number", "supplier_id", "status", "total_value", "expected_delivery", "triggered_by"],
                 "rows": table_rows,
@@ -667,6 +884,7 @@ def execute_guarded_template(
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, {'count': len(events)}),
             "table": {
                 "columns": ["event_name", "event_date", "event_type", "surge_window_before_days", "surge_window_after_days", "region"],
                 "rows": table_rows,
@@ -700,6 +918,7 @@ def execute_guarded_template(
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, {'count': len(evals)}),
             "table": {
                 "columns": ["model_name", "product_id", "wape", "rmse", "mape"],
                 "rows": table_rows,
@@ -734,6 +953,7 @@ def execute_guarded_template(
         return {
             "template_name": tpl,
             "prose": prose,
+            "prose_hi": make_hinglish_prose(tpl, {'count': len(recs)}),
             "table": {
                 "columns": ["product_id", "current_stock", "reorder_point", "safety_stock", "risk_status", "recommended_order"],
                 "rows": table_rows,
@@ -751,6 +971,569 @@ def execute_guarded_template(
     }
 
 
+def generate_smart_database_advisory(
+    db: Session,
+    query_text: str,
+    user_lang: str,
+    target_dataset: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """
+    Zero-API Database-Grounded Business & Retail Advisory Engine.
+    Answers open-ended retail strategy, profit, discount, supplier, stock management,
+    and advisory questions using real live figures from the PostgreSQL database
+    without any external paid APIs.
+    """
+    q = query_text.lower().strip()
+
+    # 1. Fetch live metrics from database
+    total_products = 0
+    critical_count = 0
+    dead_capital = 0.0
+    dead_count = 0
+    top_sku = "N/A"
+    top_qty = 0
+    top_rev = 0.0
+    active_pos_count = 0
+    po_spend = 0.0
+
+    if target_dataset:
+        try:
+            total_products = db.query(func.count(DailyProductDemand.product_id.distinct())).filter(DailyProductDemand.dataset_id == target_dataset.id).scalar() or db.query(Product).count() or 0
+        except Exception:
+            total_products = 0
+
+        try:
+            crit_recs = db.query(InventoryRecommendation).filter(
+                InventoryRecommendation.dataset_id == target_dataset.id,
+                InventoryRecommendation.current_stock <= InventoryRecommendation.reorder_point,
+            ).all()
+            critical_count = len(crit_recs)
+        except Exception:
+            critical_count = 0
+
+        try:
+            dead_items = db.query(DeadStockRecord).filter(
+                DeadStockRecord.dataset_id == target_dataset.id
+            ).all()
+            dead_count = len(dead_items)
+            dead_capital = sum(float(d.capital_tied_up or 0) for d in dead_items)
+        except Exception:
+            dead_count = 0
+            dead_capital = 0.0
+
+        try:
+            top_demands = db.query(
+                DailyProductDemand.product_id,
+                func.sum(DailyProductDemand.total_quantity).label("qty"),
+                func.sum(DailyProductDemand.total_sales_value).label("rev"),
+            ).filter(
+                DailyProductDemand.dataset_id == target_dataset.id
+            ).group_by(DailyProductDemand.product_id).order_by(desc("qty")).first()
+
+            if top_demands:
+                top_sku = str(top_demands.product_id)
+                top_qty = int(top_demands.qty or 0)
+                top_rev = float(top_demands.rev or 0)
+        except Exception:
+            pass
+
+        try:
+            pos = db.query(PurchaseOrder).filter(PurchaseOrder.dataset_id == target_dataset.id).all()
+            active_pos_count = len(pos)
+            po_spend = sum(float(p.total_value or 0) for p in pos)
+        except Exception:
+            pass
+
+    # 2. Semantic Theme Matching
+    # Theme A: Profit / Margin / Munafa / Kamai / Growth
+    if any(k in q for k in ["profit", "munafa", "kamai", "fayda", "faida", "margin", "growth", "bikri badhaye", "sales badhaye", "paisa kaise kamaye"]):
+        template_type = "profit_advisory"
+        if user_lang == 'hi':
+            prose = (
+                f"💡 **Dukaan ka Munafa (Profit) badhane ke liye 3 zaroori steps:**\n\n"
+                f"1. **Fast Movers pe Focus:** Aapka #1 selling product hai SKU {top_sku} ({top_qty} units sold, ₹{top_rev:,.0f} revenue). Iska stock kabhi khatam mat hone do kyunki yahi sabse zyada munafa deta hai.\n"
+                f"2. **Fasa Hua Paisa Nikalo:** Dead stock me ₹{dead_capital:,.0f} fasa hua hai across {dead_count} items. Ispe 25% clearance offer laga kar turant cash nikalo taaki storage kharcha bache.\n"
+                f"3. **Stockout Se Bacho:** {critical_count} items reorder point se neeche hain. Inka turant order bhejo taaki customer laut kar na jaye."
+            )
+        else:
+            prose = (
+                f"💡 **3 Key Actions to Maximize Retail Profits:**\n\n"
+                f"1. **Protect Fast Movers:** SKU {top_sku} is your top revenue driver ({top_qty} units sold, ₹{top_rev:,.0f} sales). Never allow stockouts on this line.\n"
+                f"2. **Liquidate Trapped Capital:** You have ₹{dead_capital:,.0f} locked in {dead_count} slow-moving SKUs. Run a targeted discount to release working capital.\n"
+                f"3. **Prevent Stockout Losses:** {critical_count} items breached safe thresholds. Order immediate replenishments to protect customer fill-rate."
+            )
+        table_rows = [
+            {"metric": "Top Revenue SKU", "value": f"SKU {top_sku} (₹{top_rev:,.0f})", "status": "Core Driver"},
+            {"metric": "Trapped Dead Capital", "value": f"₹{dead_capital:,.0f} ({dead_count} SKUs)", "status": "Needs Clearance"},
+            {"metric": "Low Stock SKUs", "value": f"{critical_count} items", "status": "Urgent Replenish"},
+        ]
+        suggested = ["Sabse zyada kya bik raha hai?", "Kisko reorder karna chahiye?", "Kitna dead stock fasa hai?"]
+
+    # Theme B: Discount / Offer / Clearance / Sasta
+    elif any(k in q for k in ["discount", "offer", "chhoot", "clearance", "sasta", "sale", "kitna discount", "discount kitna"]):
+        template_type = "discount_strategy"
+        if user_lang == 'hi':
+            prose = (
+                f"🏷️ **Store Discount Strategy (Munafa bachane ke hisaab se):**\n\n"
+                f"• **Top Selling Items (jaise SKU {top_sku}):** Inpe 0% discount rakhein, ye full price par achhi bikti hain.\n"
+                f"• **Normal Moving Items:** 10% se 15% bundle discount ('Buy 2 Get ₹50 Off') se basket size badhayein.\n"
+                f"• **Dead Stock ({dead_count} items, ₹{dead_capital:,.0f} fasa):** Inpe 25% se 40% clearance discount dein taaki locked paisa wapas nikal sake."
+            )
+        else:
+            prose = (
+                f"🏷️ **Recommended Store Discounting Policy:**\n\n"
+                f"• **Top Velocity SKUs (e.g. SKU {top_sku}):** 0% discount. Maintain full gross margin.\n"
+                f"• **Regular Moving Products:** 10-15% promotional bundle discount to increase basket value.\n"
+                f"• **Dead Inventory ({dead_count} items, ₹{dead_capital:,.0f} trapped):** 25-40% clearance markdown to stop storage drag."
+            )
+        table_rows = [
+            {"inventory_type": "Fast Moving (Top Sellers)", "recommended_discount": "0% (Full Margin)", "rationale": "High organic demand"},
+            {"inventory_type": "Regular Moving", "recommended_discount": "10% - 15%", "rationale": "Promotional bundle uplift"},
+            {"inventory_type": f"Dead Stock ({dead_count} items)", "recommended_discount": "25% - 40%", "rationale": f"Recover ₹{dead_capital:,.0f} locked capital"},
+        ]
+        suggested = ["Kitna paisa dead stock mein fasa hai?", "Sabse zyada kya bik raha hai?", "Kisko reorder karna chahiye?"]
+
+    # Theme C: Supplier / Vendor / Purchase Order / Kharidari
+    elif any(k in q for k in ["supplier", "vendor", "order kab", "order kaise", "purchase", "kharid", "mangwaye", "delivery", "deal"]):
+        template_type = "supplier_guidance"
+        if user_lang == 'hi':
+            prose = (
+                f"📦 **Supplier & Purchase Order Guidance:**\n\n"
+                f"• **Current Orders:** Abhi aapke {active_pos_count} active Purchase Orders hain (Total: ₹{po_spend:,.0f}).\n"
+                f"• **Urgent Orders:** {critical_count} items reorder point se neeche hain, inka PO turant dispatch karein.\n"
+                f"• **Cost Saving Tip:** Reorder items ko alag-alag mangwane ke bajay ek consolidated batch me bhejein taaki supplier freight bache aur bulk discount mile."
+            )
+        else:
+            prose = (
+                f"📦 **Supplier & Procurement Strategy:**\n\n"
+                f"• **Active Pipeline:** Currently tracking {active_pos_count} purchase orders totaling ₹{po_spend:,.0f}.\n"
+                f"• **Urgent Need:** {critical_count} SKUs breached safe inventory buffers and require purchase orders today.\n"
+                f"• **Optimization Tip:** Consolidate small purchase orders by vendor to maximize freight efficiency."
+            )
+        table_rows = [
+            {"metric": "Active Purchase Orders", "value": f"{active_pos_count} orders", "status": "In Pipeline"},
+            {"metric": "Committed PO Spend", "value": f"₹{po_spend:,.0f}", "status": "Committed"},
+            {"metric": "Items Needing Immediate PO", "value": f"{critical_count} items", "status": "Urgent Action"},
+        ]
+        suggested = ["Kisko reorder karna chahiye?", "Show purchase orders", "Kaunse saman ke daam badh rahe hain?"]
+
+    # Theme D: Greetings / Intro / Chit-chat
+    elif any(k in q for k in ["namaste", "hello", "hi", "kaise ho", "kya haal", "sun rahe ho", "tum kaun", "who are you", "kya kar sakte"]):
+        template_type = "assistant_greeting"
+        if user_lang == 'hi':
+            prose = (
+                f"👋 **Namaste! Main aapka DemandIQ AI Store Advisor hoon.**\n\n"
+                f"Main bina kisi external API ke, seedha aapke database se live figures nikal kar sahi decisions lene me madad karta hoon:\n\n"
+                f"• **Active Catalog:** {total_products} items tracked\n"
+                f"• **Low Stock Alert:** {critical_count} items reorder point par hain\n"
+                f"• **Dead Stock:** ₹{dead_capital:,.0f} fasa hua hai\n"
+                f"• **Top Selling SKU:** SKU {top_sku} ({top_qty} units)\n\n"
+                f"Aap mujhse stock, munafa, discounts, ya purchase order ke baare me kuch bhi puch sakte hain!"
+            )
+        else:
+            prose = (
+                f"👋 **Hello! I am your DemandIQ In-House Decision Copilot.**\n\n"
+                f"I operate directly on your local database with zero external API fees.\n\n"
+                f"• **Active Catalog:** {total_products} items monitored\n"
+                f"• **Low Stock Warnings:** {critical_count} items below ROP\n"
+                f"• **Trapped Capital:** ₹{dead_capital:,.0f}\n"
+                f"• **Top Volume Leader:** SKU {top_sku} ({top_qty} units)\n\n"
+                f"Ask me about profit optimization, discounting, purchase orders, or inventory health!"
+            )
+        table_rows = [
+            {"area": "Catalog Scope", "live_data": f"{total_products} SKUs tracked"},
+            {"area": "Stock Risk", "live_data": f"{critical_count} items below Reorder Point"},
+            {"area": "Dead Inventory", "live_data": f"₹{dead_capital:,.0f} across {dead_count} items"},
+            {"area": "Top Volume Leader", "live_data": f"SKU {top_sku} ({top_qty} units)"},
+        ]
+        suggested = ["Dukaan ka profit kaise badhaye?", "Kisko reorder karna chahiye?", "Kitna paisa dead stock mein fasa hai?"]
+
+    # Theme E: Store Health / Status / Kaisi chal rahi hai
+    elif any(k in q for k in ["haal", "kaisi chal rahi", "status", "overview", "summary", "health", "kaisa chal raha", "score", "report"]):
+        template_type = "store_health_summary"
+        if user_lang == 'hi':
+            prose = (
+                f"🏪 **Dukaan ki Overall Health & Business Summary:**\n\n"
+                f"• **Total Active Products:** {total_products} items monitored.\n"
+                f"• **Stock Urgency:** {critical_count} items ka stock low hai, customer demand miss na ho isliye order zaroori hai.\n"
+                f"• **Dead Capital:** ₹{dead_capital:,.0f} fasa hua hai ({dead_count} items me).\n"
+                f"• **Top Star Product:** SKU {top_sku} (₹{top_rev:,.0f} sales).\n\n"
+                f"Aapka store steady chal raha hai, bas low stock items ko replenish karein aur dead stock pe clearance lagayein."
+            )
+        else:
+            prose = (
+                f"🏪 **Store Health & Operational Diagnostic:**\n\n"
+                f"• **Monitored Catalog:** {total_products} SKUs.\n"
+                f"• **Stockout Vulnerability:** {critical_count} items operating under buffer thresholds.\n"
+                f"• **Trapped Capital:** ₹{dead_capital:,.0f} in inactive inventory.\n"
+                f"• **Top Driver:** SKU {top_sku} with ₹{top_rev:,.0f} gross sales.\n\n"
+                f"Store velocity is steady. Prioritize replenishing low stock lines."
+            )
+        table_rows = [
+            {"kpi": "Catalog SKUs", "current_value": str(total_products), "status": "Active"},
+            {"kpi": "Reorder Level Breaches", "current_value": f"{critical_count} SKUs", "status": "Action Required" if critical_count > 0 else "Optimal"},
+            {"kpi": "Dead Stock Capital", "current_value": f"₹{dead_capital:,.0f}", "status": "Clearance Priority" if dead_capital > 0 else "Clean"},
+            {"kpi": "Top Performer", "current_value": f"SKU {top_sku} ({top_qty} units)", "status": "Core Driver"},
+        ]
+        suggested = ["Kisko reorder karna chahiye?", "Sabse zyada kya bik raha hai?", "Kitna paisa dead stock mein fasa hai?"]
+
+    # Theme F: General Retail & Business Strategy (Universal Fallback)
+    else:
+        template_type = "general_business_advisory"
+        short_q = query_text[:40]
+        if user_lang == 'hi':
+            prose = (
+                f"🎯 **Aapke sawaal ('{short_q}') ke baare me live dukaan analysis:**\n\n"
+                f"1. **Stock Health:** Dukaan me {total_products} products me se {critical_count} items low stock par hain aur {dead_count} items slow-moving hain.\n"
+                f"2. **Revenue Driver:** SKU {top_sku} ({top_qty} units sold, ₹{top_rev:,.0f}) aapki dukaan ka sabse strong item hai.\n"
+                f"3. **Decision Advice:** Dead stock se ₹{dead_capital:,.0f} release karne ke liye clearance discount plan karein aur low stock items ka PO create karein."
+            )
+        else:
+            prose = (
+                f"🎯 **Business Advisory regarding '{short_q}':**\n\n"
+                f"1. **Inventory Health:** Across {total_products} catalog SKUs, {critical_count} items require immediate replenishment, while {dead_count} are idle.\n"
+                f"2. **Revenue Baseline:** SKU {top_sku} ({top_qty} units, ₹{top_rev:,.0f}) is your top velocity driver.\n"
+                f"3. **Capital Action:** Release ₹{dead_capital:,.0f} locked in dead inventory to fund replenishment buffers."
+            )
+        table_rows = [
+            {"area": "Catalog Scope", "live_metric": f"{total_products} Products Monitored"},
+            {"area": "Immediate Replenishment", "live_metric": f"{critical_count} SKUs below ROP"},
+            {"area": "Dead Stock Recovery", "live_metric": f"₹{dead_capital:,.0f} Trapped"},
+            {"area": "Top Performing SKU", "live_metric": f"SKU {top_sku} ({top_qty} units)"},
+        ]
+        suggested = ["Sabse zyada kya bik raha hai?", "Kisko reorder karna chahiye?", "Kitna paisa dead stock mein fasa hai?"]
+
+    return {
+        "template_name": template_type,
+        "prose": prose,
+        "table": {
+            "columns": list(table_rows[0].keys()) if table_rows else [],
+            "rows": table_rows,
+            "total_count": len(table_rows),
+        },
+        "suggested_prompts": suggested,
+    }
+
+
+def execute_autonomous_po_action(
+    db: Session,
+    target_dataset: Any,
+    query_text: str,
+    user_lang: str
+) -> Dict[str, Any]:
+    """
+    Autonomously creates a Purchase Order in the live database based on natural language/voice command.
+    Zero external APIs required: fully local PostgreSQL execution.
+    """
+    q_lower = query_text.lower()
+
+    # 1. Parse SKU
+    sku_match = re.search(r'\b(?:sku\s*|product\s*|item\s*)?([0-9]{5,10})\b', q_lower)
+    sku = None
+    if sku_match:
+        sku = sku_match.group(1)
+    else:
+        # Check known products
+        all_skus = db.query(Product.product_id).limit(100).all()
+        for s_tuple in all_skus:
+            if s_tuple[0].lower() in q_lower:
+                sku = s_tuple[0]
+                break
+
+    # If no SKU specified, pick top urgent ROP breach or star seller
+    if not sku:
+        urgent_rec = db.query(InventoryRecommendation).filter(
+            InventoryRecommendation.dataset_id == target_dataset.id,
+            InventoryRecommendation.status == "PENDING"
+        ).order_by(desc(InventoryRecommendation.created_at)).first()
+        if urgent_rec:
+            sku = urgent_rec.product_id
+        else:
+            top_demand = db.query(DailyProductDemand.product_id).filter(
+                DailyProductDemand.dataset_id == target_dataset.id
+            ).group_by(DailyProductDemand.product_id).order_by(desc(func.sum(DailyProductDemand.units_sold))).first()
+            if top_demand:
+                sku = top_demand[0]
+            else:
+                first_p = db.query(Product).first()
+                sku = first_p.product_id if first_p else "476825"
+
+    # 2. Parse Quantity
+    qty = 30  # sensible default batch
+    qty_matches = re.findall(r'\b(\d{1,4})\s*(?:unit|units|piece|pieces|qty|quantity|nag|bori|box|boxes|packet|packets)?\b', q_lower)
+    if qty_matches:
+        for m in qty_matches:
+            if sku and m in sku and len(m) >= 4:
+                continue
+            val = int(m)
+            if 1 <= val <= 10000:
+                qty = val
+                break
+
+    # 3. Product & Unit Cost
+    prod = db.query(Product).filter(Product.product_id == sku).first()
+    prod_name = prod.product_name if prod and prod.product_name else f"SKU {sku}"
+    
+    sp = db.query(SupplierProduct).filter(SupplierProduct.product_id == sku).first()
+    unit_cost = sp.unit_cost if sp else 120.0
+    total_val = round(qty * unit_cost, 2)
+
+    # 4. Supplier
+    supplier = db.query(Supplier).filter(Supplier.is_active == True).first()
+    if not supplier:
+        supplier = Supplier(
+            name="Primary Wholesale Distributor",
+            contact_phone="+91 98765 43210",
+            payment_terms_days=30,
+            min_order_value=1000.0,
+            is_active=True
+        )
+        db.add(supplier)
+        db.flush()
+
+    # 5. PO Number
+    po_number = f"PO-{datetime.now().strftime('%Y%m%d')}-{int(time.time()) % 10000:04d}"
+
+    # 6. Database Mutation
+    po = PurchaseOrder(
+        dataset_id=target_dataset.id,
+        po_number=po_number,
+        supplier_id=supplier.id,
+        status="draft",
+        total_value=total_val,
+        currency="INR",
+        triggered_by="copilot_autonomous",
+        notes=f"Autonomous PO created via Copilot user request: '{query_text[:80]}'",
+        expected_delivery_date=datetime.now(timezone.utc) + timedelta(days=5)
+    )
+    db.add(po)
+    db.flush()
+
+    line = PurchaseOrderLine(
+        po_id=po.id,
+        product_id=sku,
+        quantity_ordered=qty,
+        quantity_received=0,
+        unit_cost=unit_cost,
+        line_total=total_val,
+        reason_code="COPILOT_AUTONOMOUS_ACTION",
+        context_data=f'{{"source":"copilot_command","sku":"{sku}","qty":{qty}}}'
+    )
+    db.add(line)
+    db.commit()
+    db.refresh(po)
+
+    wa_text = (
+        f"Namaste Ji,\n\n"
+        f"*DemandIQ Store Purchase Order*\n"
+        f"• *PO Number:* {po_number}\n"
+        f"• *Product:* SKU {sku} ({prod_name})\n"
+        f"• *Quantity:* {qty} units\n"
+        f"• *Total Value:* ₹{total_val:,.2f}\n"
+        f"• *Delivery Expected:* 5 Days\n\n"
+        f"Kripya confirmation dein aur dispatch schedule karein. Dhanyawad!"
+    )
+
+    if user_lang == 'hi':
+        prose = (
+            f"⚡ **Autonomous Action Executed: Purchase Order Live Create Kar Diya Hai!**\n\n"
+            f"• **PO Number:** `{po_number}`\n"
+            f"• **Item:** SKU {sku} ({prod_name})\n"
+            f"• **Order Quantity:** {qty} units (₹{unit_cost:.2f} per unit)\n"
+            f"• **Total Order Value:** ₹{total_val:,.2f}\n"
+            f"• **Supplier:** {supplier.name}\n"
+            f"• **Status:** Saved as **Draft** in live database.\n\n"
+            f"Purchase order dukaan ke system me save ho chuka hai. Aap ise **Purchase Orders** page par dekh sakte hain ya neeche diye **WhatsApp Order Slip** button se supplier ko turant bhej sakte hain."
+        )
+    else:
+        prose = (
+            f"⚡ **Autonomous Action Executed: Purchase Order Created in Database!**\n\n"
+            f"• **PO Number:** `{po_number}`\n"
+            f"• **Item:** SKU {sku} ({prod_name})\n"
+            f"• **Order Quantity:** {qty} units (@ ₹{unit_cost:.2f}/unit)\n"
+            f"• **Total Order Value:** ₹{total_val:,.2f}\n"
+            f"• **Supplier:** {supplier.name}\n"
+            f"• **Status:** Saved as **Draft** in live database.\n\n"
+            f"The purchase order is committed to your live database. You can review it under **Purchase Orders** or send the WhatsApp dispatch slip directly below."
+        )
+
+    table_rows = [
+        {"field": "PO Number", "value": po_number},
+        {"field": "Target SKU", "value": f"{sku} ({prod_name})"},
+        {"field": "Quantity Ordered", "value": f"{qty} units"},
+        {"field": "Unit Price", "value": f"₹{unit_cost:.2f}"},
+        {"field": "Total Order Value", "value": f"₹{total_val:,.2f}"},
+        {"field": "Supplier", "value": supplier.name},
+        {"field": "Status", "value": "Draft (Saved in DB)"},
+    ]
+
+    return {
+        "template_name": "autonomous_po_created",
+        "prose": prose,
+        "table": {
+            "columns": ["field", "value"],
+            "rows": table_rows,
+            "total_count": len(table_rows),
+        },
+        "action_result": {
+            "action_type": "PO_CREATED",
+            "po_number": po_number,
+            "sku": sku,
+            "product_name": prod_name,
+            "quantity": qty,
+            "total_value": total_val,
+            "supplier_name": supplier.name,
+            "whatsapp_text": wa_text,
+        },
+        "suggested_prompts": [
+            "Dead stock par 20% discount laga do",
+            "Kitna paisa dead stock mein fasa hai?",
+            "Dukaan me munafa kaise badhaye?"
+        ]
+    }
+
+
+def execute_autonomous_discount_action(
+    db: Session,
+    target_dataset: Any,
+    query_text: str,
+    user_lang: str
+) -> Dict[str, Any]:
+    """
+    Autonomously marks Dead Stock records with a clearance discount in the live database.
+    Zero external APIs required: fully local PostgreSQL execution.
+    """
+    q_lower = query_text.lower()
+
+    # 1. Parse discount percentage
+    disc_match = re.search(r'(\d{1,2})\s*%', q_lower)
+    discount_pct = 0.20
+    if disc_match:
+        discount_pct = round(int(disc_match.group(1)) / 100.0, 2)
+    else:
+        num_match = re.search(r'\b(10|15|20|25|30|35|40|50)\b', q_lower)
+        if num_match:
+            discount_pct = round(int(num_match.group(1)) / 100.0, 2)
+
+    # 2. Query dead stock records
+    dead_records = db.query(DeadStockRecord).filter(
+        DeadStockRecord.dataset_id == target_dataset.id
+    ).all()
+
+    now_utc = datetime.now(timezone.utc)
+    total_capital = 0.0
+    updated_count = 0
+    sample_rows = []
+
+    for rec in dead_records:
+        rec.suggested_discount_pct = discount_pct
+        rec.recommended_action = "MARKDOWN"
+        rec.status = "APPLIED"
+        rec.action_notes = f"Clearance markdown of {int(discount_pct * 100)}% applied via Copilot command: '{query_text[:70]}'"
+        rec.action_applied_at = now_utc
+        cap = float(rec.capital_tied_up or (rec.on_hand * rec.unit_cost))
+        total_capital += cap
+        updated_count += 1
+        if len(sample_rows) < 5:
+            sample_rows.append({
+                "product_id": rec.product_id,
+                "tied_capital": f"₹{cap:,.0f}",
+                "discount_applied": f"{int(discount_pct * 100)}%",
+                "status": "APPLIED",
+                "action": "MARKDOWN"
+            })
+
+    db.commit()
+
+    wa_clearance_text = (
+        f"📢 *Dukaan Grand Clearance Sale Announcement!*\n\n"
+        f"Hamare {updated_count} selected items par flat *{int(discount_pct * 100)}% DISCOUNT* shuru ho gaya hai!\n"
+        f"Limited stock available. Jaldi aaiye aur faida uthaiye!\n\n"
+        f"📍 Dukaan: DemandIQ Smart Retail Store"
+    )
+
+    if user_lang == 'hi':
+        prose = (
+            f"⚡ **Autonomous Action Executed: {int(discount_pct * 100)}% Clearance Discount Live Apply Kar Diya!**\n\n"
+            f"• **Affected Inventory:** Total {updated_count} dead stock items\n"
+            f"• **Discount Applied:** {int(discount_pct * 100)}% clearance markdown\n"
+            f"• **Unlocked Capital Potential:** ₹{total_capital:,.0f} dukaan ka fasa hua paisa release hoga\n"
+            f"• **Database Status:** Saare records ko **APPLIED** mark kar diya gaya hai.\n\n"
+            f"Database me updates live ho chuke hain. Aap **Dead Stock** page par check kar sakte hain ya neeche diye button se customer WhatsApp alert bhej sakte hain."
+        )
+    else:
+        prose = (
+            f"⚡ **Autonomous Action Executed: {int(discount_pct * 100)}% Clearance Discount Applied!**\n\n"
+            f"• **Affected Inventory:** {updated_count} dead stock records\n"
+            f"• **Clearance Markdown:** {int(discount_pct * 100)}% applied across lines\n"
+            f"• **Unlocked Capital Potential:** ₹{total_capital:,.0f} in inactive inventory queued for recovery\n"
+            f"• **Database Status:** Records marked as **APPLIED**.\n\n"
+            f"Changes are live in PostgreSQL. Review details under **Dead Stock** or broadcast the customer clearance notice below."
+        )
+
+    table_data = sample_rows if sample_rows else [
+        {"product_id": "ALL_DEAD_STOCK", "tied_capital": f"₹{total_capital:,.0f}", "discount_applied": f"{int(discount_pct * 100)}%", "status": "APPLIED", "action": "MARKDOWN"}
+    ]
+
+    return {
+        "template_name": "autonomous_discount_applied",
+        "prose": prose,
+        "table": {
+            "columns": ["product_id", "tied_capital", "discount_applied", "status", "action"],
+            "rows": table_data,
+            "total_count": len(table_data),
+        },
+        "action_result": {
+            "action_type": "DISCOUNT_APPLIED",
+            "discount_pct": discount_pct,
+            "records_affected": updated_count,
+            "total_capital": total_capital,
+            "whatsapp_text": wa_clearance_text,
+        },
+        "suggested_prompts": [
+            "SKU 476825 ka 30 units ka order create karo",
+            "Dukaan ki health kaisi hai?",
+            "Sabse zyada kya bik raha hai?"
+        ]
+    }
+
+
+def detect_and_execute_autonomous_action(
+    db: Session,
+    target_dataset: Any,
+    query_text: str,
+    user_lang: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Detects if the user query is an explicit action command (mutating store operations).
+    Returns result dictionary if action was executed, else None.
+    """
+    q_lower = query_text.lower()
+
+    # 1. Action: Create Purchase Order / Reorder
+    po_keywords = [
+        "order bana", "create order", "order create", "place order", "order place",
+        "po bana", "create po", "po create", "generate po", "make po",
+        "order lagao", "order do", "reorder kar", "reorder do", "reorder karo",
+        "mangwa lo", "maal mangwa", "bhejo order", "order bhej"
+    ]
+    is_po_action = any(kw in q_lower for kw in po_keywords)
+    if is_po_action:
+        return execute_autonomous_po_action(db, target_dataset, query_text, user_lang)
+
+    # 2. Action: Apply Clearance Discount on Dead Stock
+    discount_action_keywords = [
+        "discount laga", "discount apply", "apply discount", "set discount",
+        "discount daal", "discount de do", "chhoot laga", "clearance shuru",
+        "markdown laga", "markdown karo", "discount kar do"
+    ]
+    is_discount_action = any(kw in q_lower for kw in discount_action_keywords)
+    if is_discount_action:
+        return execute_autonomous_discount_action(db, target_dataset, query_text, user_lang)
+
+    return None
+
+
 def handle_user_natural_language_query(
     db: Session,
     query_text: str,
@@ -760,9 +1543,10 @@ def handle_user_natural_language_query(
 ) -> Dict[str, Any]:
     """
     Main entry point for guarded natural language query execution with audit logging.
+    100% In-House & Zero-API: Uses local PostgreSQL data and deterministic advisory engine.
     """
     t0 = time.perf_counter()
-    parsed_intent = parse_natural_language_intent(query_text)
+    target_dataset = resolve_dataset(db, None, dataset_id)
 
     # Create or retrieve chat session
     if session_id:
@@ -773,55 +1557,84 @@ def handle_user_natural_language_query(
         db.commit()
         db.refresh(chat_sess)
 
-    # 1. If intent cannot be mapped to whitelisted templates, safely reject without hallucinating
-    if not parsed_intent:
-        fallback_msg = (
-            "I can only answer questions grounded in your supply chain inventory, demand forecasts, "
-            "stockouts, purchase orders, and market prices. "
-            "\n\nHere are some questions you can ask me:"
-            "\n• 'Which SKUs will stock out before Diwali?'"
-            "\n• 'What is my total capital tied up in dead stock?'"
-            "\n• 'Which items are currently below ROP?'"
-            "\n• 'Show me the top 10 SKUs by sales volume'"
-            "\n• 'Which products should I buy now given prices are rising?'"
-        )
-        # Log to chat
+    # Detect user's query language
+    user_lang = detect_query_language(query_text)
+
+    # Check for Autonomous Store Mutation Action first (e.g. create PO, apply discounts):
+    action_res = detect_and_execute_autonomous_action(db, target_dataset, query_text, user_lang)
+    if action_res:
+        exec_ms = round((time.perf_counter() - t0) * 1000, 2)
         user_msg = ChatMessage(session_id=chat_sess.id, sender_role="user", message=query_text)
         bot_msg = ChatMessage(
             session_id=chat_sess.id,
             sender_role="assistant",
-            message=fallback_msg,
-            query_template="UNMAPPED_FALLBACK",
-            execution_ms=round((time.perf_counter() - t0) * 1000, 2),
+            message=action_res["prose"],
+            query_template=action_res["template_name"],
+            execution_ms=exec_ms,
         )
         db.add_all([user_msg, bot_msg])
         db.commit()
 
         return {
-            "status": "unmapped",
+            "status": "success",
             "session_id": chat_sess.id,
-            "prose": fallback_msg,
-            "table": None,
-            "suggested_prompts": [
-                "Which SKUs will stock out before Diwali?",
-                "What's my total capital tied up in dead stock?",
-                "Show me the top 10 SKUs by sales volume",
-                "Which items are currently below ROP?",
-                "Which products should I buy now given prices are rising?",
-            ],
-            "execution_ms": round((time.perf_counter() - t0) * 1000, 2),
+            "template_name": action_res["template_name"],
+            "parameters": {},
+            "prose": action_res["prose"],
+            "table": action_res.get("table", {}),
+            "action_result": action_res.get("action_result"),
+            "suggested_prompts": action_res.get("suggested_prompts"),
+            "execution_ms": exec_ms,
+            "detected_language": user_lang,
+        }
+
+    parsed_intent = parse_natural_language_intent(query_text)
+
+    # 1. If intent cannot be mapped to rigid templates, use Zero-API Database Advisory Engine
+    if not parsed_intent:
+        advisory = generate_smart_database_advisory(db, query_text, user_lang, target_dataset)
+        exec_ms = round((time.perf_counter() - t0) * 1000, 2)
+
+        # Log to chat
+        user_msg = ChatMessage(session_id=chat_sess.id, sender_role="user", message=query_text)
+        bot_msg = ChatMessage(
+            session_id=chat_sess.id,
+            sender_role="assistant",
+            message=advisory["prose"],
+            query_template=advisory["template_name"],
+            execution_ms=exec_ms,
+        )
+        db.add_all([user_msg, bot_msg])
+        db.commit()
+
+        return {
+            "status": "success",
+            "session_id": chat_sess.id,
+            "template_name": advisory["template_name"],
+            "parameters": {},
+            "prose": advisory["prose"],
+            "table": advisory["table"],
+            "suggested_prompts": advisory.get("suggested_prompts"),
+            "execution_ms": exec_ms,
+            "detected_language": user_lang,
         }
 
     # 2. Execute whitelisted template
     execution_result = execute_guarded_template(db, parsed_intent, dataset_id=dataset_id)
     exec_ms = execution_result["execution_ms"]
 
+    # Choose prose based on user's language
+    if user_lang == 'hi' and execution_result.get("prose_hi"):
+        final_prose = execution_result["prose_hi"]
+    else:
+        final_prose = execution_result["prose"]
+
     # Log to chat history
     user_msg = ChatMessage(session_id=chat_sess.id, sender_role="user", message=query_text)
     bot_msg = ChatMessage(
         session_id=chat_sess.id,
         sender_role="assistant",
-        message=execution_result["prose"],
+        message=final_prose,
         query_template=parsed_intent.template_name,
         template_params=parsed_intent.parameters,
         execution_ms=exec_ms,
@@ -834,7 +1647,8 @@ def handle_user_natural_language_query(
         "session_id": chat_sess.id,
         "template_name": parsed_intent.template_name,
         "parameters": parsed_intent.parameters,
-        "prose": execution_result["prose"],
+        "prose": final_prose,
         "table": execution_result["table"],
         "execution_ms": exec_ms,
+        "detected_language": user_lang,
     }

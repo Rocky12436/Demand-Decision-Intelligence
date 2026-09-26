@@ -27,6 +27,7 @@ import {
 } from '../../components/ui';
 import { formatINR, formatNumber, formatPercent } from '../../lib/formatters';
 import { exportToCsv } from '../../utils/exportCsv';
+import StoreDailyBriefing from '../../components/dashboard/StoreDailyBriefing';
 
 export default function OverviewPage() {
   const navigate = useNavigate();
@@ -211,6 +212,9 @@ export default function OverviewPage() {
           </button>
         }
       />
+
+      {/* AI Dukaan Daily Voice Briefing & WhatsApp Reorder */}
+      <StoreDailyBriefing />
 
       {/* 2. Top "What you need to know" Alert Banner */}
       {criticalSkus.length > 0 && (

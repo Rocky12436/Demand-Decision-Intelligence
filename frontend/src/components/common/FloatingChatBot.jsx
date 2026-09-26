@@ -12,6 +12,13 @@ import {
   ChevronRight,
   ExternalLink,
   Zap,
+  Mic,
+  MicOff,
+  Volume2,
+  VolumeX,
+  Share2,
+  ShoppingBag,
+  Square,
 } from 'lucide-react';
 import api from '../../services/api';
 import SkuExplainabilityModal from './SkuExplainabilityModal';
@@ -23,8 +30,12 @@ export default function FloatingChatBot() {
   const [inputQuery, setInputQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [selectedSkuForModal, setSelectedSkuForModal] = useState(null);
+  const [isListening, setIsListening] = useState(false);
+  const [autoVoice, setAutoVoice] = useState(true);
+  const [currentlySpeakingId, setCurrentlySpeakingId] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const recognitionRef = useRef(null);
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -60,10 +71,10 @@ export default function FloatingChatBot() {
     }
     // Default / Dashboard
     return [
-      "How is my supply chain?",
-      "Which items are currently below ROP?",
-      "What's my total capital tied up in dead stock?",
-      "What upcoming festivals?",
+      "SKU 476825 ka 30 units ka order create karo",
+      "Dead stock par 20% discount laga do",
+      "Dukaan me munafa kaise badhaye?",
+      "Kitna paisa dead stock mein fasa hai?",
     ];
   };
 
@@ -79,7 +90,128 @@ export default function FloatingChatBot() {
     }
   }, [isOpen, messages]);
 
-  const handleSend = async (customQuery) => {
+  // Pre-load and cache voices
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      const loadVoices = () => {
+        window.speechSynthesis.getVoices();
+      };
+      loadVoices();
+      window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+  }, []);
+
+  // Initialize SpeechRecognition for Voice Chat
+  useEffect(() => {
+    const SpeechRecognition = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
+    if (SpeechRecognition) {
+      try {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = 'hi-IN'; // Recognizes both Hindi & Indian English
+
+        recognition.onstart = () => setIsListening(true);
+        recognition.onend = () => setIsListening(false);
+        recognition.onerror = () => setIsListening(false);
+        recognition.onresult = (event) => {
+          const transcript = event.results?.[0]?.[0]?.transcript;
+          if (transcript) {
+            setInputQuery(transcript);
+            handleSend(transcript, true); // true = called from voice input
+          }
+        };
+        recognitionRef.current = recognition;
+      } catch (e) {
+        console.warn('SpeechRecognition initialization error', e);
+      }
+    }
+    return () => {
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  const toggleListening = () => {
+    if (!recognitionRef.current) {
+      alert("Aapke browser me microphone speech recognition support nahi kar raha hai. Chrome ya Edge use karein.");
+      return;
+    }
+    if (isListening) {
+      recognitionRef.current.stop();
+      setIsListening(false);
+    } else {
+      try {
+        recognitionRef.current.start();
+      } catch (e) {
+        console.warn("Could not start speech recognition", e);
+      }
+    }
+  };
+
+  const cleanSpeechText = (text) => {
+    if (!text) return '';
+    return text
+      .replace(/[*#_`~]/g, '') // remove markdown symbols
+      .replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{27BF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}]/gu, '') // remove emojis
+      .replace(/₹\s*/g, 'rupaye ')
+      .replace(/\$\s*/g, 'dollar ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
+  const speakText = (text, id, lang = 'hi') => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    if (currentlySpeakingId === id) {
+      window.speechSynthesis.cancel();
+      setCurrentlySpeakingId(null);
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const clean = cleanSpeechText(text);
+    if (!clean) return;
+
+    const utterance = new SpeechSynthesisUtterance(clean);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+
+    const voices = window.speechSynthesis.getVoices() || [];
+    const isHindi = lang === 'hi' || /[\u0900-\u097F]/.test(text) || /hai|hain|karo|bik|saman|dukaan|paisa|kisko|reorder/i.test(text);
+
+    let chosenVoice = null;
+    if (isHindi) {
+      chosenVoice = voices.find(v => 
+        v.lang === 'hi-IN' || 
+        v.lang.startsWith('hi') || 
+        /hindi|swara|madhur|kalpana|hemant/i.test(v.name)
+      );
+      if (!chosenVoice) {
+        chosenVoice = voices.find(v => 
+          v.lang === 'en-IN' || 
+          /india|neerja|ravi|prabhat|heera/i.test(v.name)
+        );
+      }
+      utterance.lang = chosenVoice?.lang || 'hi-IN';
+    } else {
+      chosenVoice = voices.find(v => v.lang.startsWith('en')) || voices[0];
+      utterance.lang = chosenVoice?.lang || 'en-US';
+    }
+
+    if (chosenVoice) {
+      utterance.voice = chosenVoice;
+    }
+
+    utterance.onstart = () => setCurrentlySpeakingId(id);
+    utterance.onend = () => setCurrentlySpeakingId(null);
+    utterance.onerror = (e) => {
+      console.warn("Speech synthesis error", e);
+      setCurrentlySpeakingId(null);
+    };
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const handleSend = async (customQuery, isFromVoice = false) => {
     const q = (customQuery || inputQuery).trim();
     if (!q || loading) return;
 
@@ -90,6 +222,7 @@ export default function FloatingChatBot() {
 
     try {
       const res = await api.post('/assistant/query', { query: q });
+      const detectedLang = res.data?.detected_language || 'hi';
       const botMsg = {
         id: Date.now() + 1,
         role: 'assistant',
@@ -97,11 +230,18 @@ export default function FloatingChatBot() {
         template: res.data?.template_name,
         content: res.data?.prose,
         table: res.data?.table,
+        actionResult: res.data?.action_result,
         executionMs: res.data?.execution_ms,
         suggestedPrompts: res.data?.suggested_prompts,
+        detectedLanguage: detectedLang,
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setMessages((prev) => [...prev, botMsg]);
+
+      // Auto-speak response if triggered by voice OR autoVoice is active
+      if ((isFromVoice || autoVoice) && res.data?.prose) {
+        speakText(res.data.prose, botMsg.id, detectedLang);
+      }
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -120,6 +260,10 @@ export default function FloatingChatBot() {
 
   const clearChat = () => {
     setMessages([]);
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+      setCurrentlySpeakingId(null);
+    }
   };
 
   if (isAssistantPage) return null;
@@ -224,6 +368,33 @@ export default function FloatingChatBot() {
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <button
+                onClick={() => {
+                  if (currentlySpeakingId) {
+                    window.speechSynthesis?.cancel();
+                    setCurrentlySpeakingId(null);
+                  }
+                  setAutoVoice((prev) => !prev);
+                }}
+                style={{
+                  background: autoVoice ? '#059669' : 'rgba(255, 255, 255, 0.15)',
+                  border: autoVoice ? '1px solid #34d399' : '1px solid rgba(255, 255, 255, 0.2)',
+                  color: '#ffffff',
+                  cursor: 'pointer',
+                  padding: '4px 8px',
+                  borderRadius: '20px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  fontSize: '10px',
+                  fontWeight: 600,
+                  boxShadow: autoVoice ? '0 0 8px rgba(16, 185, 129, 0.6)' : 'none',
+                }}
+                title={autoVoice ? "Awaaz (Voice) Response ON - Click to mute" : "Awaaz (Voice) Response OFF - Click to unmute"}
+              >
+                {autoVoice ? <Volume2 size={12} color="#ffffff" /> : <VolumeX size={12} color="#cbd5e1" />}
+                <span>{autoVoice ? 'Awaaz ON' : 'Awaaz OFF'}</span>
+              </button>
               {messages.length > 0 && (
                 <button
                   onClick={clearChat}
@@ -508,6 +679,198 @@ export default function FloatingChatBot() {
                         ))}
                       </div>
                     )}
+
+                    {/* Autonomous Action Live Execution Banner */}
+                    {m.actionResult && (
+                      <div
+                        style={{
+                          marginTop: '8px',
+                          padding: '8px 10px',
+                          borderRadius: '6px',
+                          backgroundColor: 'rgba(16, 185, 129, 0.12)',
+                          border: '1px solid rgba(16, 185, 129, 0.4)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '6px',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 700, color: '#10b981' }}>
+                          <Zap size={13} fill="#10b981" />
+                          {m.actionResult.action_type === 'PO_CREATED' ? (
+                            <span>⚡ Live PO Generated in DB: {m.actionResult.po_number}</span>
+                          ) : (
+                            <span>⚡ Live Clearance Discount Applied ({Math.round((m.actionResult.discount_pct || 0.20) * 100)}%)</span>
+                          )}
+                        </div>
+
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '2px' }}>
+                          {m.actionResult.action_type === 'PO_CREATED' ? (
+                            <button
+                              onClick={() => {
+                                setIsOpen(false);
+                                navigate('/purchase-orders');
+                              }}
+                              style={{
+                                backgroundColor: '#10b981',
+                                color: '#ffffff',
+                                border: 'none',
+                                borderRadius: '4px',
+                                padding: '4px 10px',
+                                fontSize: '10px',
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                              }}
+                            >
+                              <ShoppingBag size={11} />
+                              <span>View PO in Orders</span>
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => {
+                                setIsOpen(false);
+                                navigate('/inventory/dead-stock');
+                              }}
+                              style={{
+                                backgroundColor: '#0284c7',
+                                color: '#ffffff',
+                                border: 'none',
+                                borderRadius: '4px',
+                                padding: '4px 10px',
+                                fontSize: '10px',
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                              }}
+                            >
+                              <Table size={11} />
+                              <span>View Dead Stock</span>
+                            </button>
+                          )}
+
+                          {m.actionResult.whatsapp_text && (
+                            <button
+                              onClick={() => {
+                                window.open(`https://wa.me/?text=${encodeURIComponent(m.actionResult.whatsapp_text)}`, '_blank');
+                              }}
+                              style={{
+                                backgroundColor: '#25D366',
+                                color: '#ffffff',
+                                border: 'none',
+                                borderRadius: '4px',
+                                padding: '4px 10px',
+                                fontSize: '10px',
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                              }}
+                            >
+                              <Share2 size={11} />
+                              <span>WhatsApp Order Slip</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Bot Voice & Decision Action Bar */}
+                    {m.role === 'assistant' && (
+                      <div
+                        style={{
+                          marginTop: '8px',
+                          paddingTop: '6px',
+                          borderTop: '1px solid var(--border-subtle)',
+                          display: 'flex',
+                          flexWrap: 'wrap',
+                          alignItems: 'center',
+                          gap: '6px',
+                        }}
+                      >
+                        {/* Listen Voice Button */}
+                        <button
+                          onClick={() => speakText(m.content, m.id, m.detectedLanguage || 'hi')}
+                          style={{
+                            background: currentlySpeakingId === m.id ? '#ef4444' : 'var(--bg-main)',
+                            color: currentlySpeakingId === m.id ? '#ffffff' : 'var(--text-secondary)',
+                            border: '1px solid var(--border-subtle)',
+                            borderRadius: '4px',
+                            padding: '3px 8px',
+                            fontSize: '10px',
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            transition: 'all 0.2s',
+                          }}
+                          title={currentlySpeakingId === m.id ? "Awaaz roko (Stop voice)" : "Jawab suniye (Listen in Hindi/English)"}
+                        >
+                          {currentlySpeakingId === m.id ? <Square size={10} /> : <Volume2 size={10} />}
+                          <span>{currentlySpeakingId === m.id ? 'Awaaz Roko (Stop)' : 'Suniye (Listen)'}</span>
+                        </button>
+
+                        {/* Decision 1: Create Purchase Order (if not already a PO action) */}
+                        {!m.actionResult && (
+                          <button
+                            onClick={() => {
+                              setIsOpen(false);
+                              navigate('/purchase-orders');
+                            }}
+                            style={{
+                              backgroundColor: '#10b981',
+                              color: '#ffffff',
+                              border: 'none',
+                              borderRadius: '4px',
+                              padding: '3px 8px',
+                              fontSize: '10px',
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              boxShadow: '0 1px 2px rgba(16, 185, 129, 0.2)',
+                            }}
+                            title="Generate a real Purchase Order for this item"
+                          >
+                            <ShoppingBag size={11} />
+                            <span>Order Bhejo (PO)</span>
+                          </button>
+                        )}
+
+                        {/* Decision 2: Share to WhatsApp (if not already having custom WhatsApp button) */}
+                        {!m.actionResult?.whatsapp_text && (
+                          <button
+                            onClick={() => {
+                              const waText = `Namaste Ji,\n\n*DemandIQ Decision Assistant Alert:*\n${m.content?.replace(/[*#_`]/g, '').slice(0, 200)}...\n\nKripya reorder check karein. Dhanyawad!`;
+                              window.open(`https://wa.me/?text=${encodeURIComponent(waText)}`, '_blank');
+                            }}
+                            style={{
+                              backgroundColor: '#25D366',
+                              color: '#ffffff',
+                              border: 'none',
+                              borderRadius: '4px',
+                              padding: '3px 8px',
+                              fontSize: '10px',
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                            }}
+                            title="Send alert / reorder directly to supplier via WhatsApp"
+                          >
+                            <Share2 size={11} />
+                            <span>WhatsApp</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <span style={{ fontSize: '9px', color: 'var(--text-muted)', marginTop: '2px', padding: '0 4px' }}>
                     {m.time}
@@ -542,18 +905,41 @@ export default function FloatingChatBot() {
               value={inputQuery}
               onChange={(e) => setInputQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-              placeholder="Ask about stock, ROP, forecasts, or POs..."
+              placeholder={isListening ? "Sun rahe hain... (Speak now)..." : "Puchiye ya Mic daba kar boliye..."}
               style={{
                 flex: 1,
                 padding: '8px 12px',
                 borderRadius: 'var(--border-radius-md)',
-                border: '1px solid var(--border-subtle)',
+                border: isListening ? '1px solid #ef4444' : '1px solid var(--border-subtle)',
                 fontSize: '12px',
                 outline: 'none',
-                backgroundColor: 'var(--bg-main)',
+                backgroundColor: isListening ? '#fef2f2' : 'var(--bg-main)',
                 color: 'var(--text-primary)',
               }}
             />
+
+            {/* Mic Speech-to-Text Button */}
+            <button
+              onClick={toggleListening}
+              type="button"
+              style={{
+                padding: '8px 10px',
+                backgroundColor: isListening ? '#ef4444' : 'var(--bg-main)',
+                color: isListening ? '#ffffff' : 'var(--text-secondary)',
+                border: isListening ? 'none' : '1px solid var(--border-subtle)',
+                borderRadius: 'var(--border-radius-md)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'all 0.2s',
+                boxShadow: isListening ? '0 0 10px rgba(239, 68, 68, 0.5)' : 'none',
+              }}
+              title={isListening ? "Listening... click to stop" : "Bolkar sawal puchiye (Click to speak in Hindi/English)"}
+            >
+              {isListening ? <MicOff size={14} /> : <Mic size={14} />}
+            </button>
+
             <button
               onClick={() => handleSend()}
               disabled={!inputQuery.trim() || loading}
