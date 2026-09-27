@@ -88,20 +88,43 @@ def run_vectorized_whatif_simulation(
                 query = query.filter(DailyProductDemand.product_id.in_(product_ids))
             agg_rows = query.group_by(DailyProductDemand.product_id).all()
 
-    # If still no rows in the entire DB, generate benchmark demo SKUs (100 SKUs)
-    synthetic_mode = False
     if not agg_rows:
-        synthetic_mode = True
-        rng = np.random.default_rng(42)
-        n_synth = 100
-        sku_list = [f"SKU_{i:04d}" for i in range(1, n_synth + 1)]
-        mean_d = rng.uniform(5.0, 150.0, n_synth)
-        std_d = mean_d * rng.uniform(0.15, 0.45, n_synth)
-        unit_p = rng.uniform(20.0, 500.0, n_synth)
-        unit_c = unit_p * rng.uniform(0.55, 0.75, n_synth)
-        base_lead = rng.choice([3.0, 5.0, 7.0, 10.0, 14.0], size=n_synth)
-        current_stock = mean_d * rng.uniform(3.0, 12.0, n_synth)
-
+        empty_summary = {
+            "service_level": round(service_level, 2),
+            "lead_time_days": round(float(lead_time_days or 7), 1),
+            "review_period_days": round(float(review_period_days or 7), 1),
+            "demand_multiplier": round(demand_multiplier, 2),
+            "price_change_pct": round(price_change_pct, 2),
+            "total_working_capital": 0.0,
+            "total_holding_cost": 0.0,
+            "total_stockout_cost": 0.0,
+            "total_cost": 0.0,
+            "total_safety_stock_units": 0.0,
+            "expected_stockout_units": 0.0,
+            "total_spend_required": 0.0,
+            "budget_feasible": True,
+            "budget_delta": 0.0,
+        }
+        empty_delta = {
+            "working_capital_delta": 0.0,
+            "working_capital_delta_pct": 0.0,
+            "holding_cost_delta": 0.0,
+            "stockout_cost_delta": 0.0,
+            "total_cost_delta": 0.0,
+            "safety_stock_delta_units": 0.0,
+            "stockout_units_delta": 0.0,
+        }
+        return {
+            "status": "success",
+            "sku_count": 0,
+            "execution_ms": 0.0,
+            "baseline": empty_summary,
+            "scenario": empty_summary,
+            "delta": empty_delta,
+            "top_impacted_skus": [],
+            "cost_curve": [],
+            "message": "No sales or demand records found in active dataset. Please upload a sales CSV to run policy simulations.",
+        }
 
     # Fetch supplier costs and lead times if available
     supplier_map = {}
@@ -129,44 +152,41 @@ def run_vectorized_whatif_simulation(
             int(row.lead_time_days or 7),
         )
 
-    if not synthetic_mode:
-        # Convert to high-performance numpy arrays
-        n = len(agg_rows)
-        sku_list = []
-        mean_d = np.zeros(n, dtype=float)
-        std_d = np.zeros(n, dtype=float)
-        unit_p = np.zeros(n, dtype=float)
-        unit_c = np.zeros(n, dtype=float)
-        base_lead = np.zeros(n, dtype=float)
-        current_stock = np.zeros(n, dtype=float)
+    # Convert to high-performance numpy arrays
+    n = len(agg_rows)
+    sku_list = []
+    mean_d = np.zeros(n, dtype=float)
+    std_d = np.zeros(n, dtype=float)
+    unit_p = np.zeros(n, dtype=float)
+    unit_c = np.zeros(n, dtype=float)
+    base_lead = np.zeros(n, dtype=float)
+    current_stock = np.zeros(n, dtype=float)
 
-        for i, r in enumerate(agg_rows):
-            pid = str(r.product_id)
-            sku_list.append(pid)
-            m = float(r.mean_demand or 0.0)
-            s = float(r.std_demand or 0.0) if r.std_demand is not None else max(0.1, m * 0.25)
-            p = float(r.avg_price or 100.0)
-            
-            # Determine cost & lead time
-            if pid in supplier_map and supplier_map[pid][0] > 0:
-                c, lt = supplier_map[pid]
-            elif pid in on_hand_map:
-                c = p * 0.70  # fallback 30% gross margin
-                lt = on_hand_map[pid][1]
-            else:
-                c = p * 0.70
-                lt = 7
+    for i, r in enumerate(agg_rows):
+        pid = str(r.product_id)
+        sku_list.append(pid)
+        m = float(r.mean_demand or 0.0)
+        s = float(r.std_demand or 0.0) if r.std_demand is not None else max(0.1, m * 0.25)
+        p = float(r.avg_price or 100.0)
+        
+        # Determine cost & lead time
+        if pid in supplier_map and supplier_map[pid][0] > 0:
+            c, lt = supplier_map[pid]
+        elif pid in on_hand_map:
+            c = p * 0.70  # fallback 30% gross margin
+            lt = on_hand_map[pid][1]
+        else:
+            c = p * 0.70
+            lt = 7
 
-            stock = on_hand_map[pid][0] if pid in on_hand_map else 0.0
+        stock = on_hand_map[pid][0] if pid in on_hand_map else 0.0
 
-            mean_d[i] = max(0.01, m)
-            std_d[i] = max(0.01, s)
-            unit_p[i] = max(0.01, p)
-            unit_c[i] = max(0.01, c)
-            base_lead[i] = max(1.0, float(lt))
-            current_stock[i] = max(0.0, stock)
-    else:
-        n = len(sku_list)
+        mean_d[i] = max(0.01, m)
+        std_d[i] = max(0.01, s)
+        unit_p[i] = max(0.01, p)
+        unit_c[i] = max(0.01, c)
+        base_lead[i] = max(1.0, float(lt))
+        current_stock[i] = max(0.0, stock)
 
 
     unit_margin = np.maximum(0.01, unit_p - unit_c)

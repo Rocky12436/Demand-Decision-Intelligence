@@ -52,7 +52,7 @@ export default function FloatingChatBot() {
       return [
         "Show me the top 10 SKUs by sales volume",
         "Which model is best?",
-        "Demand for SKU 19512",
+        "Show forecast for top product",
       ];
     }
     if (path.includes('procurement') || path.includes('purchase')) {

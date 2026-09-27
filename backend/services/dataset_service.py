@@ -40,15 +40,19 @@ def resolve_dataset(
     6. Seed/Demo Data dataset fallback (only if genuinely nothing else exists), marked clearly with is_demo=True.
     """
     # 1. Explicitly requested dataset_id
-    if dataset_id is not None:
-        dataset = db.query(Dataset).filter(
-            Dataset.id == dataset_id,
-            Dataset.is_active == True
-        ).first()
-        if not dataset:
-            raise HTTPException(status_code=404, detail=f"Dataset with id {dataset_id} not found or inactive.")
-        dataset.is_demo = bool(dataset.name == "Demo Data" or dataset.source == "seed")
-        return dataset
+    if dataset_id is not None and not hasattr(dataset_id, "default"):
+        try:
+            ds_int = int(dataset_id)
+            dataset = db.query(Dataset).filter(
+                Dataset.id == ds_int,
+                Dataset.is_active == True
+            ).first()
+            if not dataset:
+                raise HTTPException(status_code=404, detail=f"Dataset with id {dataset_id} not found or inactive.")
+            dataset.is_demo = bool(dataset.name == "Demo Data" or dataset.source == "seed")
+            return dataset
+        except (ValueError, TypeError):
+            pass
 
     # 2. Caller user's active dataset
     if user is not None and getattr(user, "id", None) is not None:

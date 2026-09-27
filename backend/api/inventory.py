@@ -237,39 +237,9 @@ def get_inventory_recommendations(
             "data": res_list
         }
 
-    sample_file = REPORTS_DIR / "inventory_decision_sample.csv"
-    if sample_file.exists():
-        df = pd.read_csv(sample_file).fillna(0)
-
-        if product_id:
-            df = df[df["product_id"].astype(str) == str(product_id)]
-        if city_name and city_name.upper() != "ALL":
-            df = df[df["city_name"].astype(str).str.lower() == str(city_name).lower()]
-
-        effective_as_of = as_of or target_dataset.date_max or date.today()
-        hist_warn = check_historical_warning(effective_as_of)
-
-        res_slice = df.head(limit).to_dict(orient="records")
-        return {
-            "status": "success",
-            "source": "csv_fallback",
-            "dataset_id": target_dataset.id,
-            "total_returned": len(res_slice),
-            "data": res_slice,
-            "as_of": effective_as_of.isoformat(),
-            "historical_warning": hist_warn,
-            "freshness": {
-                "computed_at": datetime.now(timezone.utc).isoformat(),
-                "data_through": target_dataset.date_max.isoformat() if target_dataset.date_max else None,
-                "is_stale": False,
-                "model_name": "EOQ_SafetyStock_95",
-                "source_upload_job_id": latest_upload_id
-            }
-        }
-
     return {
         "status": "success",
-        "source": "empty",
+        "source": "database",
         "dataset_id": target_dataset.id,
         "total_returned": 0,
         "data": []

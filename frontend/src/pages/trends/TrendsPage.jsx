@@ -7,7 +7,9 @@ import {
   RefreshCw,
   Activity,
   BarChart2,
+  Download,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import {
   ResponsiveContainer,
   BarChart,
@@ -30,6 +32,7 @@ import {
 } from '../../components/ui';
 
 export default function TrendsPage() {
+  const navigate = useNavigate();
   const [alerts, setAlerts] = useState([]);
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -82,18 +85,23 @@ export default function TrendsPage() {
   // Chart data
   const chartData = useMemo(() => {
     if (!summary) return [];
+    const spike = summary.anomaly_type_breakdown?.SPIKE_DEMAND ?? 0;
+    const drop = summary.anomaly_type_breakdown?.DROP_STOCKOUT ?? 0;
+    const crit = summary.severity_breakdown?.CRITICAL ?? 0;
+    const med = summary.severity_breakdown?.MEDIUM ?? 0;
+    if (spike === 0 && drop === 0 && crit === 0 && med === 0) return [];
     return [
-      { name: 'Demand Spikes', count: summary.anomaly_type_breakdown?.SPIKE_DEMAND || 320, color: 'var(--status-warning-icon)' },
-      { name: 'Sudden Drops', count: summary.anomaly_type_breakdown?.DROP_STOCKOUT || 415, color: 'var(--status-critical-icon)' },
-      { name: 'Critical', count: summary.severity_breakdown?.CRITICAL || 512, color: '#dc2626' },
-      { name: 'Medium', count: summary.severity_breakdown?.MEDIUM || 223, color: 'var(--accent-primary)' },
+      { name: 'Demand Spikes', count: spike, color: 'var(--status-warning-icon)' },
+      { name: 'Sudden Drops', count: drop, color: 'var(--status-critical-icon)' },
+      { name: 'Critical', count: crit, color: '#dc2626' },
+      { name: 'Medium', count: med, color: 'var(--accent-primary)' },
     ];
   }, [summary]);
 
-  const totalAnomalies = summary?.total_anomalies || alerts.length || 735;
-  const spikeCount = summary?.anomaly_type_breakdown?.SPIKE_DEMAND || 320;
-  const dropCount = summary?.anomaly_type_breakdown?.DROP_STOCKOUT || 415;
-  const criticalCount = summary?.severity_breakdown?.CRITICAL || 512;
+  const totalAnomalies = summary?.total_anomalies ?? alerts.length ?? 0;
+  const spikeCount = summary?.anomaly_type_breakdown?.SPIKE_DEMAND ?? 0;
+  const dropCount = summary?.anomaly_type_breakdown?.DROP_STOCKOUT ?? 0;
+  const criticalCount = summary?.severity_breakdown?.CRITICAL ?? 0;
 
   return (
     <PageShell maxWidth="1400px">
@@ -110,6 +118,33 @@ export default function TrendsPage() {
       />
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+
+        {/* ── Zero State Alert Banner ── */}
+        {totalAnomalies === 0 && alerts.length === 0 && !loading && (
+          <div style={{
+            padding: '20px 24px',
+            backgroundColor: 'var(--surface-card, #ffffff)',
+            border: '1px solid var(--border-color, #e2e8f0)',
+            borderRadius: '12px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '16px',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
+          }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)' }}>
+                No Anomaly or Surge Alerts Recorded
+              </div>
+              <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                Upload your retail sales CSV file to detect sudden demand spikes, drops, and stockout conditions.
+              </div>
+            </div>
+            <button onClick={() => navigate('/upload')} className="diq-btn diq-btn-primary" style={{ whiteSpace: 'nowrap' }}>
+              <Download size={15} /> Upload Sales CSV
+            </button>
+          </div>
+        )}
 
         {/* ── KPI Summary ── */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '12px' }}>
@@ -129,28 +164,34 @@ export default function TrendsPage() {
 
           {/* Chart */}
           <Card title="Alert Breakdown" icon={BarChart2} subtitle="Distribution by type and severity.">
-            <div style={{ height: 200, width: '100%' }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={chartData} margin={{ top: 10, right: 10, left: -15, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" />
-                  <XAxis dataKey="name" stroke="var(--text-muted)" fontSize={11} tickLine={false} />
-                  <YAxis stroke="var(--text-muted)" fontSize={11} />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: '#ffffff',
-                      borderColor: 'var(--border-subtle)',
-                      borderRadius: 8,
-                      boxShadow: 'var(--shadow-dropdown)',
-                      fontSize: 12,
-                    }}
-                  />
-                  <Bar dataKey="count" radius={[4, 4, 0, 0]}>
-                    {chartData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+            <div style={{ height: 200, width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              {chartData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chartData} margin={{ top: 10, right: 10, left: -15, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" />
+                    <XAxis dataKey="name" stroke="var(--text-muted)" fontSize={11} tickLine={false} />
+                    <YAxis stroke="var(--text-muted)" fontSize={11} />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#ffffff',
+                        borderColor: 'var(--border-subtle)',
+                        borderRadius: 8,
+                        boxShadow: 'var(--shadow-dropdown)',
+                        fontSize: 12,
+                      }}
+                    />
+                    <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                      {chartData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.color} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
+                  No anomaly distribution data recorded yet.
+                </div>
+              )}
             </div>
           </Card>
 

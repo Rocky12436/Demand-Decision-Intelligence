@@ -12,8 +12,10 @@ import {
   Info,
   TrendingUp,
   Settings2,
-  X
+  X,
+  Download,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
 
 const CELL_COLOR_MAP = {
@@ -29,6 +31,7 @@ const CELL_COLOR_MAP = {
 };
 
 export default function AbcXyzPage() {
+  const navigate = useNavigate();
   const [matrixData, setMatrixData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [selectedCell, setSelectedCell] = useState('AX');
@@ -197,6 +200,34 @@ export default function AbcXyzPage() {
           }}
         >
           <CheckCircle2 size={18} /> {successMessage}
+        </div>
+      )}
+
+      {/* Zero State Alert Banner */}
+      {totalSkus === 0 && !loading && (
+        <div style={{
+          padding: '20px 24px',
+          backgroundColor: 'var(--surface-card, #ffffff)',
+          border: '1px solid var(--border-color, #e2e8f0)',
+          borderRadius: '12px',
+          marginBottom: '20px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '16px',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
+        }}>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)' }}>
+              No Catalog Segmentation Data (0 SKUs)
+            </div>
+            <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
+              Upload your retail sales CSV file to run automated ABC-XYZ Pareto value and volatility classification.
+            </div>
+          </div>
+          <button onClick={() => navigate('/upload')} className="diq-btn diq-btn-primary" style={{ whiteSpace: 'nowrap' }}>
+            <Download size={15} /> Upload Sales CSV
+          </button>
         </div>
       )}
 

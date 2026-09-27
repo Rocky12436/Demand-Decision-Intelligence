@@ -16,7 +16,7 @@ import pandas as pd
 from pydantic import BaseModel
 from backend.db.session import get_db
 from backend.models.demand import DailyProductDemand
-from backend.models.forecast import ForecastRun, ForecastItem
+from backend.models.forecast import ForecastRun, ForecastItem, ForecastEvaluation
 from backend.services.dataset_service import resolve_dataset
 from datetime import datetime, timezone, date
 from backend.services.forecast_service import (
@@ -134,30 +134,46 @@ def get_forecast(
 
 
 @router.get("/evaluation")
-def get_forecast_evaluation():
+def get_forecast_evaluation(
+    dataset_id: Optional[int] = Query(default=None),
+    db: Session = Depends(get_db)
+):
     """
-    Returns the comparative evaluation metrics (MAE, RMSE, WAPE)
-    for all 8 benchmark models evaluated in Stage S3.
+    Returns comparative evaluation metrics (MAE, RMSE, WAPE) from database evaluations.
     """
-    comp_file = REPORTS_DIR / "model_comparison.csv"
-    eval_json_file = REPORTS_DIR / "forecast_evaluation_report.json"
+    target_dataset = resolve_dataset(db, None, dataset_id)
 
-    if not comp_file.exists():
-        raise HTTPException(status_code=404, detail="Evaluation results not generated yet.")
+    evals = (
+        db.query(
+            ForecastEvaluation.model_name,
+            func.avg(ForecastEvaluation.mae).label("mae"),
+            func.avg(ForecastEvaluation.rmse).label("rmse"),
+            func.avg(ForecastEvaluation.wape).label("wape"),
+        )
+        .filter(ForecastEvaluation.dataset_id == target_dataset.id)
+        .group_by(ForecastEvaluation.model_name)
+        .order_by(func.avg(ForecastEvaluation.wape).asc())
+        .all()
+    )
 
-    df_comp = pd.read_csv(comp_file)
-    models = df_comp.to_dict(orient="records")
-
-    extra_meta = {}
-    if eval_json_file.exists():
-        with open(eval_json_file, "r") as f:
-            extra_meta = json.load(f)
+    models = [
+        {
+            "model": e.model_name,
+            "mae": round(float(e.mae), 2) if e.mae is not None else None,
+            "rmse": round(float(e.rmse), 2) if e.rmse is not None else None,
+            "wape": round(float(e.wape), 2) if e.wape is not None else None,
+        }
+        for e in evals
+    ]
 
     return {
         "status": "success",
-        "best_model": models[0]["model"] if models else "Prophet (Weekly Seasonality)",
+        "best_model": models[0]["model"] if models else None,
         "models": models,
-        "metadata": extra_meta
+        "metadata": {
+            "dataset_id": target_dataset.id,
+            "total_models": len(models)
+        }
     }
 
 
@@ -212,29 +228,7 @@ def get_forecast_results(
                 }
             }
 
-    results_file = REPORTS_DIR / "forecast_results.csv"
-    if results_file.exists():
-        df = pd.read_csv(results_file)
-        if product_id:
-            df = df[df["product_id"].astype(str) == str(product_id)]
-        if city_name:
-            df = df[df["city_name"].astype(str).str.lower() == str(city_name).lower()]
 
-        if not df.empty:
-            res_slice = df.head(limit).to_dict(orient="records")
-            return {
-                "status": "success",
-                "dataset_id": target_dataset.id,
-                "total_returned": len(res_slice),
-                "data": res_slice,
-                "freshness": {
-                    "computed_at": datetime.now(timezone.utc).isoformat(),
-                    "data_through": target_dataset.date_max.isoformat() if target_dataset.date_max else None,
-                    "is_stale": False,
-                    "model_name": "Prophet_MovingAvg_Ensemble",
-                    "source_upload_job_id": latest_upload_id
-                }
-            }
 
     return {
         "status": "success",

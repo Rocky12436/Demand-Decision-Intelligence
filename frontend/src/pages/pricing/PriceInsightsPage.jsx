@@ -1291,7 +1291,7 @@ export default function PriceInsightsPage() {
           <div className="grid-kpi" style={{ margin: 0 }}>
             <div className="kpi-card">
               <div className="kpi-title">Analyzed Catalog SKUs</div>
-              <div className="kpi-value">{elasticityMeta.total_analyzed_skus || 630}</div>
+              <div className="kpi-value">{elasticityMeta.total_analyzed_skus || 0}</div>
               <div
                 style={{
                   fontSize: '0.8rem',
@@ -1306,7 +1306,7 @@ export default function PriceInsightsPage() {
             <div className="kpi-card">
               <div className="kpi-title">Elastic SKUs (PED &lt; -1.0)</div>
               <div className="kpi-value" style={{ color: 'var(--accent-emerald)' }}>
-                {elasticityMeta.elastic_count || 630}
+                {elasticityMeta.elastic_count || 0}
               </div>
               <div
                 style={{

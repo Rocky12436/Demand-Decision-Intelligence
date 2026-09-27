@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -19,6 +20,7 @@ import {
   CheckCircle2,
   Loader2,
   X,
+  Download,
 } from 'lucide-react';
 import api from '../../services/api';
 import {
@@ -41,6 +43,7 @@ const DEFAULT_SIM_PARAMS = {
 };
 
 export default function WhatIfSimulatorPage() {
+  const navigate = useNavigate();
   const [params, setParams] = useState(DEFAULT_SIM_PARAMS);
   const [simulationData, setSimulationData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -149,6 +152,34 @@ export default function WhatIfSimulatorPage() {
           display: 'flex', alignItems: 'center', gap: '6px',
         }}>
           <CheckCircle2 size={16} /> {saveSuccessMsg}
+        </div>
+      )}
+
+      {/* Zero State Alert Banner */}
+      {simulationData && simulationData.sku_count === 0 && (
+        <div style={{
+          padding: '20px 24px',
+          backgroundColor: 'var(--surface-card, #ffffff)',
+          border: '1px solid var(--border-color, #e2e8f0)',
+          borderRadius: '12px',
+          marginBottom: '20px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '16px',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
+        }}>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)' }}>
+              No Demand Data Available (0 SKUs)
+            </div>
+            <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
+              Upload a retail sales CSV file to run inventory policy simulations across your catalog.
+            </div>
+          </div>
+          <button onClick={() => navigate('/upload')} className="diq-btn diq-btn-primary" style={{ whiteSpace: 'nowrap' }}>
+            <Download size={15} /> Upload Sales CSV
+          </button>
         </div>
       )}
 
