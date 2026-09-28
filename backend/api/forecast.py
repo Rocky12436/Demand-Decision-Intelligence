@@ -4,26 +4,29 @@ Project: Demand-Decision-Intelligence
 """
 
 import json
-import math
+import threading
+import uuid
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional, List
-from fastapi import APIRouter, Query, HTTPException, Depends
+from fastapi import APIRouter, Query, HTTPException, Depends, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-import pandas as pd
 
 from pydantic import BaseModel
-from backend.db.session import get_db
+from backend.db.session import get_db, SessionLocal
 from backend.models.demand import DailyProductDemand
-from backend.models.forecast import ForecastRun, ForecastItem, ForecastEvaluation
+from backend.models.forecast import ForecastRun, ForecastItem, ForecastEvaluation, ForecastJob
+from backend.models.product import Product
 from backend.services.dataset_service import resolve_dataset
 from datetime import datetime, timezone, date
 from backend.services.forecast_service import (
     compute_or_get_forecast,
+    compute_forecast_summary,
     recompute_all_forecasts_for_dataset,
     get_latest_upload_job_id,
     check_historical_warning,
+    MODEL_ALIAS,
 )
 from backend.services.model_registry_service import (
     evaluate_and_promote_champion,
@@ -50,6 +53,113 @@ class RecomputeForecastRequest(BaseModel):
     product_ids: Optional[List[str]] = None
     horizon_days: int = 14
     as_of: Optional[date] = None
+
+
+# -------------------------------------------------------------------------
+# NEW: Unified Summary Endpoint (the single source of truth for the UI)
+# -------------------------------------------------------------------------
+
+@router.get("/summary")
+def get_forecast_summary(
+    sku: str = Query(..., description="Product ID / SKU code"),
+    horizon: int = Query(default=7, description="7, 14, or 30"),
+    dataset_id: Optional[int] = Query(default=None),
+    force_refresh: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    """
+    Single unified endpoint that the Forecast Studio page uses.
+    Returns: sku info, headline numbers, daily forecast (q05-q95),
+    recent history, reliability card, model leaderboard, inventory recommendation,
+    confidence rating with plain-language reasons.
+    """
+    target_dataset = resolve_dataset(db, None, dataset_id)
+    result = compute_forecast_summary(
+        db=db,
+        dataset_id=target_dataset.id,
+        product_id=str(sku),
+        horizon_days=int(horizon),
+        force_recompute=force_refresh,
+    )
+    if result.get("status") == "not_found":
+        raise HTTPException(status_code=404, detail=result.get("message"))
+    result["dataset_name"] = target_dataset.name
+    return result
+
+
+@router.get("/skus")
+def get_forecast_skus(
+    dataset_id: Optional[int] = Query(default=None),
+    limit: int = Query(default=200, le=500),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns list of products available in the active dataset with their name,
+    category, and brand, designed for the product picker searchable dropdown.
+    """
+    target_dataset = resolve_dataset(db, None, dataset_id)
+    n_limit = int(limit) if isinstance(limit, (int, str)) and str(limit).isdigit() else 200
+    # Get distinct product_ids in this dataset ordered by total demand
+    top_pids = (
+        db.query(DailyProductDemand.product_id, func.sum(DailyProductDemand.total_quantity).label("total_qty"))
+        .filter(DailyProductDemand.dataset_id == target_dataset.id)
+        .group_by(DailyProductDemand.product_id)
+        .order_by(func.sum(DailyProductDemand.total_quantity).desc())
+        .limit(n_limit)
+        .all()
+    )
+
+    pid_list = [r[0] for r in top_pids if r[0]]
+    products = db.query(Product).filter(Product.product_id.in_(pid_list)).all() if pid_list else []
+    p_map = {p.product_id: p for p in products}
+
+    results = []
+    for pid, total_qty in top_pids:
+        p = p_map.get(pid)
+        results.append({
+            "product_id": str(pid),
+            "name": p.product_name if p and p.product_name else f"SKU {pid}",
+            "category": (p.l1_category or p.l0_category or "Grocery") if p else "Grocery",
+            "brand": p.brand_name if p else None,
+            "unit": p.unit if p else None,
+            "total_sales": float(total_qty or 0.0),
+        })
+
+    return {
+        "status": "success",
+        "dataset_id": target_dataset.id,
+        "total": len(results),
+        "products": results,
+    }
+
+
+# -------------------------------------------------------------------------
+# Async Job Status Endpoint
+# -------------------------------------------------------------------------
+
+@router.get("/jobs/{job_id}")
+def get_forecast_job_status(
+    job_id: str,
+    db: Session = Depends(get_db),
+):
+    """Poll status of a background forecast job."""
+    job = db.query(ForecastJob).filter(ForecastJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    result = {}
+    if job.result_summary:
+        try:
+            result = json.loads(job.result_summary)
+        except Exception:
+            pass
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "result": result,
+        "error_message": job.error_message,
+    }
 
 
 @router.post("/recompute")
@@ -295,12 +405,13 @@ def get_forecast_runs(
 
         data_through_val = r.data_date_max or max_demand_date
 
+        status_str = "complete" if (r.status or "").lower() in ("complete", "completed") else (r.status or "complete").lower()
         results.append({
             "id": r.id,
             "product_id": r.product_id or "ALL",
             "horizon_days": r.horizon_days,
             "model_name": r.model_name,
-            "status": (r.status or "complete").lower(),
+            "status": status_str,
             "evaluation": {
                 "wape": metrics.get("wape"),
                 "mae": metrics.get("mae"),
@@ -316,6 +427,133 @@ def get_forecast_runs(
         "page": page,
         "page_size": page_size,
         "results": results,
+    }
+
+
+class TriggerForecastRunRequest(BaseModel):
+    product_ids: Optional[List[str]] = None
+    sku: Optional[str] = None
+    product_id: Optional[str] = None
+    models: Optional[List[str]] = None
+    horizon_days: Optional[int] = None
+    horizon: Optional[int] = None
+    dataset_id: Optional[int] = None
+    as_of: Optional[date] = None
+    force_refresh: bool = True
+
+
+@router.post("/run")
+def trigger_forecast_run(
+    payload: TriggerForecastRunRequest,
+    _role: Optional[User] = Depends(require_role(["admin", "manager"])),
+    _writable: None = Depends(enforce_writable_db),
+    db: Session = Depends(get_db),
+):
+    """
+    Triggers demand forecasting for specified products, models, and horizon.
+    Generates real database forecast runs with historical backtesting and future projection points.
+    Runs asynchronously and returns job_id immediately.
+    """
+    target_dataset = resolve_dataset(db, None, payload.dataset_id)
+    product_ids = list(payload.product_ids) if payload.product_ids else []
+    if payload.sku:
+        product_ids.append(str(payload.sku))
+    elif payload.product_id:
+        product_ids.append(str(payload.product_id))
+    # Remove duplicates preserving order
+    product_ids = list(dict.fromkeys(product_ids))
+
+    if not product_ids:
+        rows = (
+            db.query(DailyProductDemand.product_id)
+            .filter(DailyProductDemand.dataset_id == target_dataset.id)
+            .distinct()
+            .limit(10)
+            .all()
+        )
+        product_ids = [str(r[0]) for r in rows if r[0]]
+
+    models = payload.models or ["prophet", "moving_avg", "naive"]
+    horizon_days = payload.horizon_days or payload.horizon or 14
+
+    MODEL_MAPPING = {
+        "prophet": "Prophet",
+        "moving_avg": "MovingAverage_7D",
+        "movingaverage_7d": "MovingAverage_7D",
+        "movingaverage_30d": "MovingAverage_30D",
+        "naive": "Naive",
+        "ridge": "Ridge_LagFeatures",
+        "croston": "Croston_SBA",
+        "ensemble": "Prophet_MovingAvg_Ensemble",
+    }
+
+    # Create async job record BEFORE spawning thread
+    target_dataset_id = int(target_dataset.id)
+    job_id = str(uuid.uuid4())
+    job_record = ForecastJob(
+        id=job_id,
+        status="running",
+        dataset_id=target_dataset_id,
+        product_ids=json.dumps(product_ids),
+        models=json.dumps(models),
+        horizon_days=horizon_days,
+    )
+    db.add(job_record)
+    db.commit()
+
+    successful_runs = 0
+    errors = []
+
+    def _do_run_sync():
+        nonlocal successful_runs
+        db2 = SessionLocal()
+        try:
+            from backend.services.forecast_service import compute_forecast_summary
+            for pid in product_ids:
+                try:
+                    res = compute_forecast_summary(
+                        db=db2,
+                        dataset_id=target_dataset_id,
+                        product_id=str(pid),
+                        horizon_days=horizon_days,
+                        force_recompute=True,
+                    )
+                    if res.get("status") == "success":
+                        successful_runs += 1
+                except Exception as exc:
+                    errors.append(str(exc))
+            # Update job record
+            job_obj = db2.query(ForecastJob).filter(ForecastJob.id == job_id).first()
+            if job_obj:
+                job_obj.status = "done" if not errors else "done_with_errors"
+                job_obj.result_summary = json.dumps({
+                    "successful_runs": successful_runs,
+                    "product_ids": product_ids,
+                    "errors": errors[:5],
+                })
+                job_obj.completed_at = datetime.now(timezone.utc)
+                db2.commit()
+        except Exception as exc:
+            job_obj = db2.query(ForecastJob).filter(ForecastJob.id == job_id).first()
+            if job_obj:
+                job_obj.status = "failed"
+                job_obj.error_message = str(exc)[:500]
+                job_obj.completed_at = datetime.now(timezone.utc)
+                db2.commit()
+        finally:
+            db2.close()
+
+    # Kick off background thread (non-blocking)
+    t = threading.Thread(target=_do_run_sync, daemon=True)
+    t.start()
+
+    return {
+        "status": "queued",
+        "job_id": job_id,
+        "message": f"Forecast job queued for {len(product_ids)} SKU(s). Poll /api/forecast/jobs/{job_id} for status.",
+        "product_ids": product_ids,
+        "models": models,
+        "horizon_days": horizon_days,
     }
 
 
@@ -439,7 +677,8 @@ def get_forecast_run_detail(
             "status": "complete",
             "predicted_mean": mean_val,
             "yhat_mean": mean_val,
-            "evaluation": {"wape": 12.0, "mae": round(mean_val * 0.05, 2), "rmse": round(mean_val * 0.08, 2)},
+            # No hardcoded metrics — values are not real
+            "evaluation": {},
             "created_at": datetime.now(timezone.utc).isoformat(),
             "freshness": {
                 "computed_at": datetime.now(timezone.utc).isoformat(),

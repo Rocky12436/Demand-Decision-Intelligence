@@ -4,14 +4,20 @@ from sqlalchemy.orm import relationship
 from backend.db.session import Base
 
 
+
 class ForecastRun(Base):
     __tablename__ = "forecast_runs"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     dataset_id = Column(Integer, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False, index=True)
-    model_name = Column(String(100), nullable=False, index=True)  # Prophet, MovingAverage_7D, Naive
+    model_name = Column(String(100), nullable=False, index=True)  # effective/used model: Prophet, MovingAverage_7D, Naive
+    model_requested = Column(String(100), nullable=True, index=True)  # model the caller asked for (may differ)
+    skip_reason = Column(Text, nullable=True)  # plain-language reason if status='SKIPPED'
+    data_version_hash = Column(String(64), nullable=True, index=True)  # SHA256 of (dataset_id+product_id+as_of) for idempotency
+    history_obs_count = Column(Integer, nullable=True)  # number of history rows used for this run
+    job_id = Column(String(64), nullable=True, index=True)  # async job that triggered this run
     horizon_days = Column(Integer, nullable=False, default=14)  # 7, 14, 30
-    status = Column(String(50), nullable=False, default="RUNNING", index=True)  # RUNNING, COMPLETED, FAILED
+    status = Column(String(50), nullable=False, default="RUNNING", index=True)  # RUNNING, COMPLETED, FAILED, SKIPPED
     is_stale = Column(Boolean, nullable=False, default=False, index=True)
     superseded_by = Column(Integer, ForeignKey("forecast_runs.id", ondelete="SET NULL"), nullable=True)
     source_upload_job_id = Column(Integer, ForeignKey("upload_jobs.id", ondelete="SET NULL"), nullable=True)
@@ -70,6 +76,12 @@ class ForecastEvaluation(Base):
     rmse = Column(Float, nullable=True)
     mape = Column(Float, nullable=True)
     wape = Column(Float, nullable=True)
+    bias = Column(Float, nullable=True)  # mean signed error (positive = over-forecast)
+    improvement_vs_naive_pct = Column(Float, nullable=True)  # (naive_wape - model_wape) / naive_wape * 100
+    fold_index = Column(Integer, nullable=True)  # which backtest fold (0-indexed)
+    pinball_loss = Column(Float, nullable=True)  # mean pinball loss on holdout
+    coverage_50 = Column(Float, nullable=True)  # actual % of holdout within [q25, q75]
+    coverage_90 = Column(Float, nullable=True)  # actual % of holdout within [q05, q95]
     evaluation_date = Column(DateTime(timezone=True), server_default=func.now())
 
     run = relationship("ForecastRun", back_populates="evaluations")
@@ -94,3 +106,19 @@ class ModelDriftRecord(Base):
     __table_args__ = (
         Index("idx_drift_dataset_product", "dataset_id", "product_id"),
     )
+
+
+class ForecastJob(Base):
+    """Lightweight async job tracker for background forecast runs."""
+    __tablename__ = "forecast_jobs"
+
+    id = Column(String(64), primary_key=True)  # uuid
+    status = Column(String(50), nullable=False, default="queued")  # queued, running, done, failed
+    dataset_id = Column(Integer, nullable=True)
+    product_ids = Column(Text, nullable=True)   # JSON list
+    models = Column(Text, nullable=True)         # JSON list
+    horizon_days = Column(Integer, nullable=True)
+    result_summary = Column(Text, nullable=True) # JSON summary
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    completed_at = Column(DateTime(timezone=True), nullable=True)
