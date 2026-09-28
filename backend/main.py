@@ -118,6 +118,7 @@ async def request_tracing_and_metrics_middleware(request: Request, call_next):
                 "error_id": req_id,
                 "error_code": "INTERNAL_SERVER_ERROR",
                 "message": "Internal error",
+                "detail": str(exc),
             },
             headers={"X-Request-ID": req_id},
         )
