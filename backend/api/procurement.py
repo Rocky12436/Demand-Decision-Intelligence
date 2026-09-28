@@ -21,12 +21,13 @@ from backend.services.procurement_service import (
     send_po_email,
 )
 from backend.services.recommendation_lifecycle import process_goods_receipt_learning_loop
+from backend.services.dataset_service import resolve_dataset
 
 router = APIRouter(prefix="/purchase-orders", tags=["Procurement & Purchase Orders"])
 
 
 class GeneratePORequest(BaseModel):
-    dataset_id: int = 1
+    dataset_id: Optional[int] = None
     recommendation_ids: Optional[List[int]] = None
 
 
@@ -52,9 +53,12 @@ def generate_pos(
     Generates DRAFT POs grouped by preferred supplier with quantities
     rounded UP to order_multiple and floored at MOQ.
     """
+    target_ds = resolve_dataset(db, current_user, payload.dataset_id)
+    eff_dataset_id = target_ds.id if target_ds else 1
+
     user_id = current_user.id if current_user else None
     results = generate_draft_purchase_orders(
-        dataset_id=payload.dataset_id,
+        dataset_id=eff_dataset_id,
         db=db,
         created_by_user_id=user_id,
         specific_recommendation_ids=payload.recommendation_ids
@@ -68,15 +72,18 @@ def generate_pos(
 
 @router.get("")
 def list_purchase_orders(
-    dataset_id: Optional[int] = 1,
+    dataset_id: Optional[int] = None,
     status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_or_guest),
 ):
     """Lists purchase orders with supplier and line count information."""
+    target_ds = resolve_dataset(db, current_user, dataset_id)
+    eff_dataset_id = target_ds.id if target_ds else 1
+
     query = db.query(PurchaseOrder)
-    if dataset_id:
-        query = query.filter(PurchaseOrder.dataset_id == dataset_id)
+    if eff_dataset_id:
+        query = query.filter(PurchaseOrder.dataset_id == eff_dataset_id)
     if status_filter:
         query = query.filter(PurchaseOrder.status == status_filter.lower())
 
