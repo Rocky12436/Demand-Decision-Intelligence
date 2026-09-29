@@ -13,8 +13,10 @@ from fastapi import APIRouter, Query, HTTPException, Depends, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from backend.db.session import get_db, SessionLocal
+from backend.models.procurement import Supplier, SupplierProduct
+from backend.models.inventory import InventoryState, LeadTimeObservation
 from backend.models.demand import DailyProductDemand
 from backend.models.forecast import ForecastRun, ForecastItem, ForecastEvaluation, ForecastJob
 from backend.models.product import Product
@@ -557,6 +559,198 @@ def trigger_forecast_run(
     }
 
 
+# -------------------------------------------------------------------------
+# Lead Time & Stock Configuration Endpoints (Simulated -> Configured)
+# -------------------------------------------------------------------------
+
+class UpdateLeadTimeRequest(BaseModel):
+    product_id: str
+    dataset_id: Optional[int] = None
+    lead_time_days: int = Field(..., ge=1, le=180, description="Supplier lead time in days")
+    current_stock: Optional[float] = Field(default=None, ge=0, description="Current on-hand inventory units")
+    supplier_name: Optional[str] = Field(default=None, description="Supplier / vendor name")
+    service_level: Optional[float] = Field(default=0.95, ge=0.5, le=0.999)
+
+
+@router.get("/lead-time")
+def get_sku_lead_time_settings(
+    sku: str = Query(..., description="Product SKU ID"),
+    dataset_id: Optional[int] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns current supplier lead-time parameters and stock levels for a SKU.
+    Indicates whether lead time is verified/configured or simulated default.
+    """
+    target_dataset = resolve_dataset(db, None, dataset_id)
+    product = db.query(Product).filter(Product.product_id == str(sku)).first()
+
+    sp = (
+        db.query(SupplierProduct)
+        .filter(SupplierProduct.product_id == str(sku))
+        .order_by(SupplierProduct.is_preferred.desc(), SupplierProduct.id.asc())
+        .first()
+    )
+
+    lto = (
+        db.query(LeadTimeObservation)
+        .filter(
+            LeadTimeObservation.dataset_id == target_dataset.id,
+            LeadTimeObservation.product_id == str(sku),
+        )
+        .order_by(LeadTimeObservation.created_at.desc())
+        .first()
+    )
+
+    inv = (
+        db.query(InventoryState)
+        .filter(
+            InventoryState.dataset_id == target_dataset.id,
+            InventoryState.product_id == str(sku),
+        )
+        .order_by(InventoryState.snapshot_date.desc(), InventoryState.id.desc())
+        .first()
+    )
+
+    configured_lead_time = None
+    is_configured = False
+    if sp and sp.promised_lead_time_days:
+        configured_lead_time = sp.promised_lead_time_days
+        is_configured = True
+    elif lto and lto.actual_days:
+        configured_lead_time = lto.actual_days
+        is_configured = True
+
+    supplier_name = sp.supplier.name if (sp and sp.supplier) else "Primary Wholesale Distributor"
+    supplier_id = sp.supplier_id if sp else None
+
+    return {
+        "status": "success",
+        "product_id": str(sku),
+        "product_name": product.product_name if product else str(sku),
+        "dataset_id": target_dataset.id,
+        "lead_time_days": configured_lead_time if configured_lead_time is not None else 7,
+        "is_configured": is_configured,
+        "current_stock": float(inv.closing_stock) if (inv and inv.closing_stock is not None) else None,
+        "supplier_id": supplier_id,
+        "supplier_name": supplier_name,
+        "service_level": 0.95,
+    }
+
+
+@router.post("/lead-time")
+def update_sku_lead_time_settings(
+    payload: UpdateLeadTimeRequest,
+    db: Session = Depends(get_db),
+    _write_guard: None = Depends(enforce_writable_db),
+):
+    """
+    Updates or configures real supplier lead time and on-hand inventory for a SKU.
+    Transitions recommendation from simulated default to verified supply-chain parameters.
+    """
+    target_dataset = resolve_dataset(db, None, payload.dataset_id)
+    product_id_str = str(payload.product_id).strip()
+
+    # 1. Resolve or create Supplier
+    supplier_name = (payload.supplier_name or "").strip() or "Primary Wholesale Distributor"
+    supplier = db.query(Supplier).filter(Supplier.name.ilike(supplier_name)).first()
+    if not supplier:
+        supplier = Supplier(
+            name=supplier_name,
+            contact_email=f"procurement@{supplier_name.lower().replace(' ', '')}.com",
+            payment_terms_days=30,
+            min_order_value=0.0,
+            is_active=True,
+        )
+        db.add(supplier)
+        db.flush()
+
+    # 2. Upsert SupplierProduct
+    sp = (
+        db.query(SupplierProduct)
+        .filter(
+            SupplierProduct.product_id == product_id_str,
+            SupplierProduct.supplier_id == supplier.id,
+        )
+        .first()
+    )
+    if not sp:
+        # Check if any supplier product exists for this item
+        sp = db.query(SupplierProduct).filter(SupplierProduct.product_id == product_id_str).first()
+
+    if sp:
+        sp.supplier_id = supplier.id
+        sp.promised_lead_time_days = payload.lead_time_days
+        sp.is_preferred = True
+    else:
+        sp = SupplierProduct(
+            supplier_id=supplier.id,
+            product_id=product_id_str,
+            unit_cost=10.0,
+            moq=1,
+            order_multiple=1,
+            promised_lead_time_days=payload.lead_time_days,
+            is_preferred=True,
+        )
+        db.add(sp)
+
+    # 3. Record LeadTimeObservation for audit and statistical models (King's formula)
+    now_utc = datetime.now(timezone.utc)
+    obs = LeadTimeObservation(
+        dataset_id=target_dataset.id,
+        product_id=product_id_str,
+        supplier_id=str(supplier.id),
+        po_id="MANUAL_SLA_CONFIG",
+        promised_days=payload.lead_time_days,
+        actual_days=payload.lead_time_days,
+        ordered_at=now_utc,
+        received_at=now_utc,
+    )
+    db.add(obs)
+
+    # 4. If current stock provided, upsert InventoryState
+    today_date = date.today()
+    if payload.current_stock is not None:
+        inv = (
+            db.query(InventoryState)
+            .filter(
+                InventoryState.dataset_id == target_dataset.id,
+                InventoryState.product_id == product_id_str,
+                InventoryState.snapshot_date == today_date,
+            )
+            .first()
+        )
+        if inv:
+            inv.opening_stock = float(payload.current_stock)
+            inv.closing_stock = float(payload.current_stock)
+            inv.is_simulated = False
+        else:
+            inv = InventoryState(
+                dataset_id=target_dataset.id,
+                product_id=product_id_str,
+                city_name="ALL",
+                snapshot_date=today_date,
+                opening_stock=float(payload.current_stock),
+                stock_received=0.0,
+                sales_quantity=0.0,
+                closing_stock=float(payload.current_stock),
+                is_simulated=False,
+            )
+            db.add(inv)
+
+    db.commit()
+
+    return {
+        "status": "success",
+        "message": f"Successfully updated lead time to {payload.lead_time_days} days for SKU {product_id_str}.",
+        "product_id": product_id_str,
+        "lead_time_days": payload.lead_time_days,
+        "current_stock": payload.current_stock,
+        "supplier_name": supplier.name,
+        "is_configured": True,
+    }
+
+
 @router.get("/{run_id}")
 def get_forecast_run_detail(
     run_id: str,
@@ -804,3 +998,4 @@ def generate_launch_curve(payload: LaunchCurveRequest):
         curve_shape=payload.curve_shape,
         horizon_days=payload.horizon_days,
     )
+

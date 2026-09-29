@@ -740,11 +740,13 @@ def compute_inventory_recommendation(
     service_level: float = 0.95,
     lead_time_days: int = 7,
     current_stock: Optional[float] = None,
+    is_simulated: bool = True,
 ) -> Dict[str, Any]:
     """Compute reorder point, safety stock, suggested order qty."""
     if not quantities:
         return {}
 
+    lead_time_days = max(1, int(lead_time_days))
     horizon_demand = sum(p["q50"] for p in daily_forecast)
     daily_mean = float(np.mean(quantities[-30:])) if quantities else 0.0
 
@@ -759,7 +761,7 @@ def compute_inventory_recommendation(
 
     reorder_point = round(expected_lead_time_demand + safety_stock, 1)
     suggest_order_qty = round(horizon_demand + safety_stock, 1)
-    stockout_risk_days = (current_stock / max(daily_mean, 0.1)) if current_stock else None
+    stockout_risk_days = (current_stock / max(daily_mean, 0.1)) if current_stock is not None else None
 
     if stockout_risk_days is not None:
         if stockout_risk_days < lead_time_days:
@@ -771,13 +773,24 @@ def compute_inventory_recommendation(
     else:
         stockout_risk = "MEDIUM"
 
-    assumptions = [
-        f"Lead time: {lead_time_days} days (simulated — not from your actual supplier data)",
-        f"Service level: {int(service_level * 100)}% (probability of not running out)",
-        f"Safety stock calculated from {len(quantities)} historical demand observations",
-    ]
-    if current_stock is None:
-        assumptions.append("Current stock level: not uploaded — using estimates only")
+    if is_simulated:
+        assumptions = [
+            f"Lead time: {lead_time_days} days (simulated — not from your actual supplier data)",
+            f"Service level: {int(service_level * 100)}% (probability of not running out)",
+            f"Safety stock calculated from {len(quantities)} historical demand observations",
+        ]
+        if current_stock is None:
+            assumptions.append("Current stock level: not uploaded — using estimates only")
+    else:
+        assumptions = [
+            f"Lead time: {lead_time_days} days (configured from supplier parameters)",
+            f"Service level: {int(service_level * 100)}% (target non-stockout probability)",
+            f"Safety stock calculated from {len(quantities)} historical demand observations",
+        ]
+        if current_stock is not None:
+            assumptions.append(f"Current stock level: {round(current_stock, 1):g} units (verified on-hand stock)")
+        else:
+            assumptions.append("Current stock level: not specified")
 
     return {
         "reorder_point": reorder_point,
@@ -787,9 +800,10 @@ def compute_inventory_recommendation(
         "daily_mean": round(daily_mean, 2),
         "service_level": service_level,
         "lead_time_days": lead_time_days,
+        "current_stock": current_stock,
         "stockout_risk": stockout_risk,
         "assumptions": assumptions,
-        "data_source": "simulated",
+        "data_source": "simulated" if is_simulated else "configured",
     }
 
 
@@ -1037,7 +1051,59 @@ def compute_forecast_summary(
     ]
 
     # 11. Inventory recommendation
-    recommendation = compute_inventory_recommendation(quantities, champion_points)
+    from backend.models.procurement import SupplierProduct
+    from backend.models.inventory import LeadTimeObservation, InventoryState
+
+    sp = (
+        db.query(SupplierProduct)
+        .filter(SupplierProduct.product_id == str(product_id))
+        .order_by(SupplierProduct.is_preferred.desc(), SupplierProduct.id.asc())
+        .first()
+    )
+
+    lto = (
+        db.query(LeadTimeObservation)
+        .filter(
+            LeadTimeObservation.dataset_id == dataset_id,
+            LeadTimeObservation.product_id == str(product_id),
+        )
+        .order_by(LeadTimeObservation.created_at.desc())
+        .first()
+    )
+
+    inv = (
+        db.query(InventoryState)
+        .filter(
+            InventoryState.dataset_id == dataset_id,
+            InventoryState.product_id == str(product_id),
+        )
+        .order_by(InventoryState.snapshot_date.desc(), InventoryState.id.desc())
+        .first()
+    )
+
+    configured_lead_time = None
+    is_lead_time_simulated = True
+    if sp and sp.promised_lead_time_days:
+        configured_lead_time = sp.promised_lead_time_days
+        is_lead_time_simulated = False
+    elif lto and lto.actual_days:
+        configured_lead_time = lto.actual_days
+        is_lead_time_simulated = False
+
+    effective_lead_time = configured_lead_time if configured_lead_time is not None else 7
+
+    current_stock_val = None
+    if inv and inv.closing_stock is not None:
+        current_stock_val = float(inv.closing_stock)
+
+    recommendation = compute_inventory_recommendation(
+        quantities=quantities,
+        daily_forecast=champion_points,
+        service_level=0.95,
+        lead_time_days=effective_lead_time,
+        current_stock=current_stock_val,
+        is_simulated=is_lead_time_simulated,
+    )
 
     # 12. Reliability card
     baseline_wape = wape_by_model.get("SeasonalNaive")

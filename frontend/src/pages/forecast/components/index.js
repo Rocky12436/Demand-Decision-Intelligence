@@ -5,3 +5,5 @@ export { ForecastChart } from './ForecastChart';
 export { ReliabilityCard } from './ReliabilityCard';
 export { NoticeList } from './NoticeList';
 export { TechnicalPanel } from './TechnicalPanel';
+export { UpdateLeadTimeModal } from './UpdateLeadTimeModal';
+

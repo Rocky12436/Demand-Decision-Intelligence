@@ -107,6 +107,80 @@ def list_purchase_orders(
     return {"purchase_orders": results}
 
 
+@router.get("/catalog-lead-times")
+def list_catalog_lead_times(
+    dataset_id: Optional[int] = 1,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_or_guest),
+):
+    """Lists SKUs with their supplier lead times, on-hand inventory, and configuration status."""
+    from backend.models.product import Product
+    from backend.models.inventory import InventoryState
+    from backend.models.demand import DailyProductDemand
+    from backend.services.dataset_service import resolve_dataset
+    from sqlalchemy import func
+
+    target_dataset = resolve_dataset(db, None, dataset_id)
+
+    # Distinct product IDs from active dataset
+    demand_pids = [
+        r[0] for r in (
+            db.query(DailyProductDemand.product_id)
+            .filter(DailyProductDemand.dataset_id == target_dataset.id)
+            .group_by(DailyProductDemand.product_id)
+            .order_by(func.sum(DailyProductDemand.total_quantity).desc())
+            .limit(limit)
+            .all()
+        ) if r[0]
+    ]
+
+    # Also include any product with an active SupplierProduct configuration
+    configured_sp_pids = [
+        r[0] for r in db.query(SupplierProduct.product_id).distinct().limit(limit).all() if r[0]
+    ]
+
+    all_pids = list(dict.fromkeys(configured_sp_pids + demand_pids))[:limit]
+    products = db.query(Product).filter(Product.product_id.in_(all_pids)).all() if all_pids else []
+
+    p_ids = [p.product_id for p in products]
+    sp_list = db.query(SupplierProduct).filter(SupplierProduct.product_id.in_(p_ids)).all()
+    sp_map = {sp.product_id: sp for sp in sp_list}
+
+    inv_list = db.query(InventoryState).filter(
+        InventoryState.dataset_id == target_dataset.id,
+        InventoryState.product_id.in_(p_ids)
+    ).all()
+    inv_map = {inv.product_id: inv for inv in inv_list}
+
+    results = []
+    for p in products:
+        sp = sp_map.get(p.product_id)
+        inv = inv_map.get(p.product_id)
+        lead_time = sp.promised_lead_time_days if sp else 7
+        is_conf = bool(sp and sp.promised_lead_time_days)
+        results.append({
+            "product_id": p.product_id,
+            "product_name": p.product_name,
+            "category": p.l1_category or p.l0_category or "General",
+            "supplier_id": sp.supplier_id if sp else None,
+            "supplier_name": sp.supplier.name if (sp and sp.supplier) else "Primary Wholesale Distributor",
+            "lead_time_days": lead_time,
+            "is_configured": is_conf,
+            "current_stock": float(inv.closing_stock) if inv and inv.closing_stock is not None else 0.0,
+            "unit_cost": sp.unit_cost if sp else 10.0,
+            "moq": sp.moq if sp else 1,
+            "order_multiple": sp.order_multiple if sp else 1,
+        })
+
+    return {
+        "status": "success",
+        "dataset_id": target_dataset.id,
+        "total": len(results),
+        "catalog": results
+    }
+
+
 @router.get("/{po_id}")
 def get_purchase_order_details(
     po_id: int,
@@ -214,3 +288,4 @@ def record_goods_receipt(
         db=db,
         notes=payload.notes
     )
+
