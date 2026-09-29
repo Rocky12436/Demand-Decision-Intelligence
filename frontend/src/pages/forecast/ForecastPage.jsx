@@ -8,12 +8,14 @@ import {
   ReliabilityCard,
   NoticeList,
   TechnicalPanel,
+  UpdateLeadTimeModal,
 } from './components';
 import { AlertCircle, RefreshCw, Package } from 'lucide-react';
 import './forecast.css';
 
 export default function ForecastPage() {
   const [isTechnicalView, setIsTechnicalView] = useState(false);
+  const [isLeadTimeModalOpen, setIsLeadTimeModalOpen] = useState(false);
 
   const {
     data,
@@ -165,6 +167,7 @@ export default function ForecastPage() {
               historicalWarning={data.historical_warning}
               recommendation={data.recommendation}
               models={data.models}
+              onOpenLeadTimeModal={() => setIsLeadTimeModalOpen(true)}
             />
 
             {/* 5. Technical View (On Demand) */}
@@ -178,6 +181,20 @@ export default function ForecastPage() {
                 computedAt={data.computed_at}
               />
             )}
+
+            {/* 6. Lead Time & Stock Calibration Modal */}
+            <UpdateLeadTimeModal
+              isOpen={isLeadTimeModalOpen}
+              onClose={() => setIsLeadTimeModalOpen(false)}
+              sku={selectedSku}
+              skuName={data.sku?.product_name}
+              currentLeadTime={data.recommendation?.lead_time_days || 7}
+              currentStock={data.recommendation?.current_stock}
+              isConfigured={data.recommendation?.data_source === 'configured'}
+              onSuccess={() => {
+                refreshForecast();
+              }}
+            />
           </div>
         )}
       </div>

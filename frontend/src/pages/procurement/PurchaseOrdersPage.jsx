@@ -11,6 +11,9 @@ import {
   ShoppingBag,
   X,
   Loader2,
+  Truck,
+  Sliders,
+  Search,
 } from 'lucide-react';
 import {
   PageShell,
@@ -19,9 +22,17 @@ import {
   StatusBadge,
   EmptyState,
 } from '../../components/ui';
+import { UpdateLeadTimeModal } from '../forecast/components/UpdateLeadTimeModal';
 
 export default function PurchaseOrdersPage() {
+  const [activeTab, setActiveTab] = useState('orders'); // 'orders' | 'catalog'
   const [purchaseOrders, setPurchaseOrders] = useState([]);
+  const [catalog, setCatalog] = useState([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogSearch, setCatalogSearch] = useState('');
+  const [selectedSkuForModal, setSelectedSkuForModal] = useState(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [selectedPo, setSelectedPo] = useState(null);
@@ -45,9 +56,30 @@ export default function PurchaseOrdersPage() {
     }
   };
 
+  const fetchCatalog = async () => {
+    setCatalogLoading(true);
+    try {
+      const res = await fetch('/api/purchase-orders/catalog-lead-times?dataset_id=1');
+      if (res.ok) {
+        const data = await res.json();
+        setCatalog(data.catalog || []);
+      }
+    } catch (err) {
+      console.error('Failed to load supplier lead times:', err);
+    } finally {
+      setCatalogLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchPOs();
   }, []);
+
+  useEffect(() => {
+    if (activeTab === 'catalog') {
+      fetchCatalog();
+    }
+  }, [activeTab]);
 
   const handleGeneratePOs = async () => {
     setGenerating(true);
@@ -170,7 +202,134 @@ export default function PurchaseOrdersPage() {
         </div>
       )}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+      {/* Navigation Tabs */}
+      <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid var(--border-subtle, #e2e8f0)', paddingBottom: '12px', marginBottom: '16px' }}>
+        <button
+          onClick={() => setActiveTab('orders')}
+          className={`diq-btn ${activeTab === 'orders' ? 'diq-btn-primary' : 'diq-btn-secondary'}`}
+        >
+          <FileText size={14} /> Active Orders ({purchaseOrders.length})
+        </button>
+        <button
+          onClick={() => setActiveTab('catalog')}
+          className={`diq-btn ${activeTab === 'catalog' ? 'diq-btn-primary' : 'diq-btn-secondary'}`}
+        >
+          <Truck size={14} /> Supplier Lead Times & Catalog
+        </button>
+      </div>
+
+      {activeTab === 'catalog' ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {/* Catalog Top bar */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+            <div style={{ position: 'relative', flex: 1, maxWidth: '360px' }}>
+              <Search size={14} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+              <input
+                type="text"
+                placeholder="Search products or suppliers..."
+                value={catalogSearch}
+                onChange={(e) => setCatalogSearch(e.target.value)}
+                style={{
+                  width: '100%', padding: '8px 12px 8px 32px',
+                  borderRadius: 'var(--border-radius-md)', border: '1px solid var(--border-subtle, #cbd5e1)',
+                  fontSize: '13px', background: '#ffffff',
+                }}
+              />
+            </div>
+            <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+              Showing {catalog.filter(c => !catalogSearch || c.product_name.toLowerCase().includes(catalogSearch.toLowerCase()) || c.product_id.toLowerCase().includes(catalogSearch.toLowerCase())).length} SKU(s)
+            </div>
+          </div>
+
+          {catalogLoading ? (
+            <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '14px' }}>
+              <Loader2 size={24} style={{ animation: 'spin 1s linear infinite', margin: '0 auto 8px', display: 'block', color: 'var(--accent-primary)' }} />
+              Loading supplier lead times catalog...
+            </div>
+          ) : catalog.length === 0 ? (
+            <Card>
+              <div style={{ padding: '36px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                No SKUs found in active dataset.
+              </div>
+            </Card>
+          ) : (
+            <Card>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', textAlign: 'left' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '2px solid var(--border-subtle, #e2e8f0)', color: 'var(--text-muted)' }}>
+                      <th style={{ padding: '10px 14px', fontWeight: 600 }}>SKU / Product</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 600 }}>Supplier</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 600 }}>Turnaround (Lead Time)</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 600 }}>Warehouse Stock</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 600 }}>Status</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 600, textAlign: 'right' }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {catalog
+                      .filter(c => !catalogSearch || c.product_name.toLowerCase().includes(catalogSearch.toLowerCase()) || c.product_id.toLowerCase().includes(catalogSearch.toLowerCase()) || (c.supplier_name && c.supplier_name.toLowerCase().includes(catalogSearch.toLowerCase())))
+                      .map((item) => (
+                        <tr key={item.product_id} style={{ borderBottom: '1px solid var(--border-subtle, #f1f5f9)' }}>
+                          <td style={{ padding: '12px 14px' }}>
+                            <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{item.product_name}</div>
+                            <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{item.product_id} · {item.category}</div>
+                          </td>
+                          <td style={{ padding: '12px 14px', color: 'var(--text-secondary)' }}>
+                            {item.supplier_name}
+                          </td>
+                          <td style={{ padding: '12px 14px' }}>
+                            <span style={{
+                              display: 'inline-flex', alignItems: 'center', gap: '4px',
+                              fontWeight: 700, color: item.is_configured ? '#4338ca' : '#64748b',
+                              background: item.is_configured ? '#eef2ff' : '#f1f5f9',
+                              padding: '2px 8px', borderRadius: '4px'
+                            }}>
+                              <Truck size={12} /> {item.lead_time_days} days
+                            </span>
+                          </td>
+                          <td style={{ padding: '12px 14px', fontFamily: 'var(--font-mono)' }}>
+                            {item.current_stock > 0 ? `${item.current_stock.toLocaleString()} units` : <span style={{ color: '#94a3b8' }}>Unspecified</span>}
+                          </td>
+                          <td style={{ padding: '12px 14px' }}>
+                            {item.is_configured ? (
+                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '11px', fontWeight: 600, color: '#065f46', background: '#ecfdf5', padding: '2px 8px', borderRadius: '9999px', border: '1px solid #a7f3d0' }}>
+                                <CheckCircle2 size={11} /> Verified SLA
+                              </span>
+                            ) : (
+                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '11px', fontWeight: 600, color: '#92400e', background: '#fffbeb', padding: '2px 8px', borderRadius: '9999px', border: '1px solid #fde68a' }}>
+                                <AlertCircle size={11} /> Simulated (7d)
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ padding: '12px 14px', textAlign: 'right' }}>
+                            <button
+                              onClick={() => {
+                                setSelectedSkuForModal({
+                                  sku: item.product_id,
+                                  name: item.product_name,
+                                  leadTime: item.lead_time_days,
+                                  stock: item.current_stock,
+                                  isConfigured: item.is_configured,
+                                });
+                                setIsModalOpen(true);
+                              }}
+                              className="diq-btn diq-btn-secondary"
+                              style={{ padding: '4px 10px', fontSize: '12px' }}
+                            >
+                              <Sliders size={12} /> Update
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
 
         {loading ? (
           <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '14px' }}>Loading orders...</div>
@@ -258,7 +417,8 @@ export default function PurchaseOrdersPage() {
             );
           })
         )}
-      </div>
+        </div>
+      )}
 
       {/* ── Goods Receipt Modal ── */}
       {receiptModalOpen && selectedPo && (
@@ -360,6 +520,26 @@ export default function PurchaseOrdersPage() {
             )}
           </div>
         </div>
+      )}
+
+      {/* ── Supplier Lead Time Calibration Modal ── */}
+      {selectedSkuForModal && (
+        <UpdateLeadTimeModal
+          isOpen={isModalOpen}
+          onClose={() => {
+            setIsModalOpen(false);
+            setSelectedSkuForModal(null);
+          }}
+          sku={selectedSkuForModal.sku}
+          skuName={selectedSkuForModal.name}
+          currentLeadTime={selectedSkuForModal.leadTime}
+          currentStock={selectedSkuForModal.stock}
+          isConfigured={selectedSkuForModal.isConfigured}
+          onSuccess={() => {
+            fetchCatalog();
+            fetchPOs();
+          }}
+        />
       )}
 
       <style>{`

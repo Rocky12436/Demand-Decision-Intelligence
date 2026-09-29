@@ -1,11 +1,12 @@
 import React from 'react';
-import { AlertCircle, UploadCloud, Info, Clock, AlertTriangle } from 'lucide-react';
+import { AlertCircle, UploadCloud, Info, Clock, AlertTriangle, CheckCircle2, Sliders } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
 export function NoticeList({
   skuClassification,
   historicalWarning,
   recommendation,
+  onOpenLeadTimeModal,
 }) {
   const navigate = useNavigate();
   const notices = [];
@@ -37,16 +38,38 @@ export function NoticeList({
     });
   }
 
-  // 3. Simulated inventory & lead time notice
-  if (recommendation?.data_source === 'simulated' || recommendation?.assumptions?.some((a) => a.includes('simulated'))) {
+  // 3. Simulated vs Configured inventory & lead time notice
+  const isSimulated =
+    recommendation?.data_source === 'simulated' ||
+    recommendation?.assumptions?.some((a) => a.includes('simulated'));
+
+  if (isSimulated) {
+    const leadTimeDisplay = recommendation?.lead_time_days || 7;
     notices.push({
       id: 'simulated_inventory',
       type: 'neutral',
       icon: <AlertCircle className="w-4 h-4 text-slate-700 flex-shrink-0 mt-0.5" />,
       title: 'Simulated Order Assumptions',
-      text: 'Lead time (7 days) and current stock are simulated estimates because supplier delivery times were not uploaded. Use as guidance rather than strict orders.',
+      text: `Lead time (${leadTimeDisplay} days) and current stock are simulated estimates because supplier delivery times were not uploaded. Use as guidance rather than strict orders.`,
       actionLabel: 'Update Lead Times',
-      onAction: () => navigate('/procurement'),
+      actionIcon: <Sliders style={{ width: '14px', height: '14px' }} />,
+      onAction: onOpenLeadTimeModal ? onOpenLeadTimeModal : () => navigate('/procurement'),
+    });
+  } else if (recommendation?.data_source === 'configured') {
+    const leadTimeDisplay = recommendation?.lead_time_days || 7;
+    const stockDisplay =
+      recommendation?.current_stock != null
+        ? ` and ${Math.round(recommendation.current_stock).toLocaleString()} on-hand units`
+        : '';
+    notices.push({
+      id: 'configured_inventory',
+      type: 'success',
+      icon: <CheckCircle2 className="w-4 h-4 text-emerald-700 flex-shrink-0 mt-0.5" />,
+      title: 'Configured Supplier Parameters Active',
+      text: `Calibrated with verified supplier turnaround of ${leadTimeDisplay} days${stockDisplay}. Reorder points and buffer recommendations match your operational contracts.`,
+      actionLabel: 'Adjust Parameters',
+      actionIcon: <Sliders style={{ width: '14px', height: '14px' }} />,
+      onAction: onOpenLeadTimeModal ? onOpenLeadTimeModal : () => navigate('/procurement'),
     });
   }
 
@@ -89,7 +112,7 @@ export function NoticeList({
                 onClick={n.onAction}
                 className="forecast-notice-btn"
               >
-                <UploadCloud style={{ width: '14px', height: '14px' }} />
+                {n.actionIcon || <UploadCloud style={{ width: '14px', height: '14px' }} />}
                 <span>{n.actionLabel}</span>
               </button>
             )}
